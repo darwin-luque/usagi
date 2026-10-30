@@ -19,8 +19,10 @@ usagi spends zero model tokens. It reads the login files that your harnesses alr
 usagi needs Rust 1.85 or later.
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/darwin-luque/usagi
 ```
+
+To install from a local copy, run `cargo install --path .` in the repository folder.
 
 ## Start
 
