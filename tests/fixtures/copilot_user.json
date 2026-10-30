@@ -1,0 +1,55 @@
+{
+  "copilot_plan": "business",
+  "access_type_sku": "copilot_for_business_seat_quota",
+  "quota_reset_date": "2026-11-01",
+  "quota_snapshots": {
+    "chat": {
+      "overage_count": 0,
+      "overage_permitted": false,
+      "percent_remaining": 100.0,
+      "quota_id": "chat",
+      "quota_remaining": 0.0,
+      "unlimited": true,
+      "timestamp_utc": "2026-10-30T01:31:43.771Z",
+      "has_quota": true,
+      "quota_reset_at": 0,
+      "token_based_billing": true,
+      "credits_used": 0,
+      "overage_entitlement": 0,
+      "remaining": 0,
+      "entitlement": 0
+    },
+    "completions": {
+      "overage_count": 0,
+      "overage_permitted": false,
+      "percent_remaining": 100.0,
+      "quota_id": "completions",
+      "quota_remaining": 0.0,
+      "unlimited": true,
+      "timestamp_utc": "2026-10-30T01:31:43.771Z",
+      "has_quota": true,
+      "quota_reset_at": 0,
+      "token_based_billing": true,
+      "credits_used": 0,
+      "overage_entitlement": 0,
+      "remaining": 0,
+      "entitlement": 0
+    },
+    "premium_interactions": {
+      "overage_count": 0,
+      "overage_permitted": true,
+      "percent_remaining": 100.0,
+      "quota_id": "premium_interactions",
+      "quota_remaining": 0.0,
+      "unlimited": true,
+      "timestamp_utc": "2026-10-30T01:31:43.771Z",
+      "has_quota": true,
+      "quota_reset_at": 0,
+      "token_based_billing": true,
+      "credits_used": 433,
+      "overage_entitlement": 0,
+      "remaining": 0,
+      "entitlement": 0
+    }
+  }
+}

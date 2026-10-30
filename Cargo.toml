@@ -1,0 +1,18 @@
+[package]
+name = "usagi"
+version = "0.1.0"
+edition = "2024"
+description = "Show the usage limits of your AI agent harnesses. No model tokens used."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+ureq = { version = "3", features = ["json"] }

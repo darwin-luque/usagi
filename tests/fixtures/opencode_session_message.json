@@ -1,0 +1,1 @@
+{"time":{"created":1793252924770,"streamed":1793253007353,"completed":1793253007354},"model":{"id":"glm-5.3-flash","providerID":"opencode-go","variant":"default"},"cost":0.00877495,"tokens":{"input":38205,"output":1632,"reasoning":4130,"cache":{"read":5440,"write":0}}}
