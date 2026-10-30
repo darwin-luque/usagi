@@ -24,6 +24,8 @@ cargo install --git https://github.com/darwin-luque/usagi
 
 To install from a local copy, run `cargo install --path .` in the repository folder.
 
+Each [release](https://github.com/darwin-luque/usagi/releases) also has binaries for Linux, macOS, and Windows.
+
 ## Start
 
 1. Find your harnesses and save them in the config file:
@@ -84,6 +86,21 @@ usagi usage --raw --only claude | awk '$2 == "5h" { print $3 }'
 - [Harness map](docs/harnesses.md) tells how each harness exposes usage and how usagi reads it.
 - [Configuration](docs/configuration.md) lists all config keys, themes, and limits.
 - [Custom command](docs/custom-command.md) tells how to connect a harness that usagi does not know.
+
+## Releases
+
+usagi uses [semantic versioning](https://semver.org). All changes go to `main` through pull requests. The pull request title is the commit message, and it must follow [Conventional Commits](https://www.conventionalcommits.org):
+
+| Title | Next version from 0.1.0 |
+| --- | --- |
+| `fix: ...` | 0.1.1 |
+| `feat: ...` | 0.2.0 |
+| `feat!: ...` or a `BREAKING CHANGE:` footer | 0.2.0 before 1.0, then the next major version |
+| `docs: ...`, `chore: ...`, `test: ...`, `refactor: ...`, `ci: ...` | No release |
+
+The pull request description must fill in the What, Why, and How sections of the [template](.github/pull_request_template.md). CI fails if one of them is empty.
+
+After each merge, [release-please](https://github.com/googleapis/release-please) opens or updates a release pull request. It changes the version in `Cargo.toml` and adds the changes to `CHANGELOG.md`. Merge that pull request to tag the version, publish the GitHub release, and attach the binaries.
 
 ## Privacy
 

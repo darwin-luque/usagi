@@ -1,6 +1,6 @@
 [package]
 name = "usagi"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 description = "Show the usage limits of your AI agent harnesses. No model tokens used."
 license = "MIT"
