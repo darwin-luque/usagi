@@ -120,7 +120,8 @@ mod tests {
 
     fn check_database(actual_column: bool) {
         let path = std::env::temp_dir().join(format!(
-            "usagi-hermes-{}-{}.db",
+            "usagi-hermes-{}-{}-{}.db",
+            actual_column,
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap()
         ));
