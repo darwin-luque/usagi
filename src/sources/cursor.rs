@@ -79,6 +79,7 @@ fn select_login(
 }
 
 const PAGE_SIZE: usize = 1000;
+const PARALLEL_PAGES: usize = 8;
 
 fn post(token: &str, method: &str, body: String) -> Result<Value, ProbeError> {
     let value = remote::response(
@@ -112,20 +113,31 @@ pub fn fetch(state_db: Option<&Path>) -> Result<Usage, ProbeError> {
 pub fn events(state_db: Option<&Path>, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
     let now = Utc::now();
     let (token, _) = select_login(candidates(state_db), now)?;
-    let mut events = Vec::new();
-    for page in 1.. {
+    let token = token.as_str();
+    let page = move |page: usize| {
         let body = serde_json::json!({
             "startDate": since.timestamp_millis().to_string(),
             "endDate": now.timestamp_millis().to_string(),
             "page": page,
             "pageSize": PAGE_SIZE,
         });
-        let (batch, total) =
-            parse_events(&post(&token, "GetFilteredUsageEvents", body.to_string())?)?;
-        let done = batch.len() < PAGE_SIZE || events.len() + batch.len() >= total;
-        events.extend(batch);
-        if done {
-            break;
+        parse_events(&post(token, "GetFilteredUsageEvents", body.to_string())?)
+    };
+    let (mut events, total) = page(1)?;
+    let rest: Vec<usize> = (2..=total.div_ceil(PAGE_SIZE)).collect();
+    for batch in rest.chunks(PARALLEL_PAGES) {
+        let pages = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|&number| scope.spawn(move || page(number)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("page thread does not panic"))
+                .collect::<Vec<_>>()
+        });
+        for result in pages {
+            events.extend(result?.0);
         }
     }
     Ok(events)
