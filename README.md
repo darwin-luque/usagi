@@ -98,6 +98,8 @@ usagi uses [semantic versioning](https://semver.org). All changes go to `main` t
 | `feat!: ...` or a `BREAKING CHANGE:` footer | 0.2.0 before 1.0, then the next major version |
 | `docs: ...`, `chore: ...`, `test: ...`, `refactor: ...`, `ci: ...` | No release |
 
+The pull request description must fill in the What, Why, and How sections of the [template](.github/pull_request_template.md). CI fails if one of them is empty.
+
 After each merge, [release-please](https://github.com/googleapis/release-please) opens or updates a release pull request. It changes the version in `Cargo.toml` and adds the changes to `CHANGELOG.md`. Merge that pull request to tag the version, publish the GitHub release, and attach the binaries.
 
 ## Privacy

@@ -35,3 +35,31 @@ jobs:
       - uses: amannn/action-semantic-pull-request@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  pr-body:
+    name: pr-body
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require What, Why, and How
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        shell: python
+        run: |
+          import os, re, sys
+          body = re.sub(r"<!--.*?-->", "", os.environ.get("BODY") or "", flags=re.S)
+          sections = {}
+          current = None
+          for line in body.splitlines():
+              heading = re.match(r"^##\s+(.+?)\s*$", line)
+              if heading:
+                  current = heading.group(1).strip().lower()
+                  sections.setdefault(current, "")
+              elif current:
+                  sections[current] += line.strip()
+          missing = [name for name in ("What", "Why", "How") if not sections.get(name.lower())]
+          if missing:
+              print("Fill in these sections of the pull request description: " + ", ".join(missing))
+              print("Each one needs a '## <name>' heading with text under it. See .github/pull_request_template.md.")
+              sys.exit(1)
+          print("What, Why, and How are filled in.")
