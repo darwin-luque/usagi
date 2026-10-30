@@ -2,6 +2,7 @@ mod breakdown;
 mod config;
 mod history;
 mod kinds;
+mod prices;
 mod probe;
 mod render;
 mod sources;
@@ -400,7 +401,8 @@ fn show_breakdown(path: &Path, args: BreakdownArgs) -> Result<u8> {
     let read = harvests
         .iter()
         .any(|harvest| matches!(harvest.history, history::History::Events(_)));
-    let breakdown = request.build(harvests);
+    let prices = prices::load(args.metric == Metric::Cost);
+    let breakdown = request.build(harvests, prices.as_ref());
     let output = if args.json {
         render::breakdown::json(&breakdown)
     } else {

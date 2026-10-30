@@ -452,34 +452,31 @@ fn notes(breakdown: &Breakdown) -> Vec<String> {
         notes.push("Use --type cost to see the cost.".into());
         return notes;
     }
-    if breakdown.total.unpriced_tokens > 0 {
+    if !breakdown.estimated.is_empty() {
         notes.push(format!(
-            "{} tokens have no price and add no cost.",
-            token_count(breakdown.total.unpriced_tokens)
+            "Cost for {} is an estimate from public API prices. Subscription plans are not billed this way.",
+            list(&breakdown.estimated)
         ));
     }
-    let titles = |recorded: bool| {
-        let mut titles: Vec<&str> = Vec::new();
-        for harvest in &breakdown.harvests {
-            if harvest
-                .events()
-                .iter()
-                .any(|event| event.cost_usd.is_some() == recorded)
-                && !titles.contains(&harvest.title)
-            {
-                titles.push(harvest.title);
-            }
-        }
-        titles
-    };
-    let recorded = titles(true);
-    match recorded.as_slice() {
+    match breakdown.recorded.as_slice() {
         [] => {}
         [title] => notes.push(format!("Cost for {title} is what {title} reports.")),
         many => notes.push(format!(
             "Cost for {} is what each harness reports.",
             list(many)
         )),
+    }
+    let unpriced = breakdown.total.unpriced_tokens;
+    if unpriced > 0 && !breakdown.priced {
+        notes.push(format!(
+            "usagi cannot get the price list. {} tokens have no cost.",
+            token_count(unpriced)
+        ));
+    } else if unpriced > 0 {
+        notes.push(format!(
+            "{} tokens have no known price and add no cost.",
+            token_count(unpriced)
+        ));
     }
     notes
 }
@@ -593,9 +590,10 @@ mod tests {
     use super::*;
     use crate::breakdown::tests::{at, event, harvest};
     use crate::breakdown::{Grouping, Request};
+    use crate::prices::Prices;
     use crate::usage::ProbeError;
 
-    fn build(grouping: Grouping, metric: Metric) -> Breakdown {
+    fn build(grouping: Grouping, metric: Metric, prices: Option<&Prices>) -> Breakdown {
         Request {
             past: "3d".parse().unwrap(),
             until: at("2026-10-04T12:00:00Z"),
@@ -603,22 +601,31 @@ mod tests {
             grouping,
             top: 10,
         }
-        .build(vec![
-            harvest(
-                "claude",
-                Rgb(1, 2, 3),
-                History::Events(vec![
-                    event("2026-10-02T10:00:00Z", "opus", 1_999_999, None),
-                    event("2026-10-03T10:00:00Z", "haiku", 499_999, None),
-                ]),
-            ),
-            harvest("copilot", Rgb(4, 5, 6), History::Unsupported),
-            harvest(
-                "codex",
-                Rgb(7, 8, 9),
-                History::Failed(ProbeError::Parse("Bad file.".into())),
-            ),
-        ])
+        .build(
+            vec![
+                harvest(
+                    "claude",
+                    Rgb(1, 2, 3),
+                    History::Events(vec![
+                        event("2026-10-02T10:00:00Z", "opus", 1_999_999, None),
+                        event("2026-10-03T10:00:00Z", "haiku", 499_999, None),
+                    ]),
+                ),
+                harvest("copilot", Rgb(4, 5, 6), History::Unsupported),
+                harvest(
+                    "codex",
+                    Rgb(7, 8, 9),
+                    History::Failed(ProbeError::Parse("Bad file.".into())),
+                ),
+            ],
+            prices,
+        )
+    }
+
+    fn opus_prices() -> Prices {
+        Prices::from_list(&serde_json::json!({
+            "opus": {"input_cost_per_token": 1e-6, "output_cost_per_token": 1e-5}
+        }))
     }
 
     #[test]
@@ -637,7 +644,7 @@ mod tests {
 
     #[test]
     fn plain_shows_totals_rows_and_notes() {
-        let text = render(&build(Grouping::Model, Metric::Tokens), false, 80);
+        let text = render(&build(Grouping::Model, Metric::Tokens, None), false, 80);
         let lines: Vec<_> = text.lines().collect();
         assert!(lines[0].starts_with("Breakdown  last 3 days  tokens"));
         assert_eq!(lines[3], "  2.5M tokens");
@@ -659,7 +666,7 @@ mod tests {
 
     #[test]
     fn day_chart_has_one_column_per_day_and_axis_labels() {
-        let text = render(&build(Grouping::Day, Metric::Tokens), false, 80);
+        let text = render(&build(Grouping::Day, Metric::Tokens, None), false, 80);
         let chart: Vec<_> = text
             .lines()
             .skip_while(|line| !line.contains("By day"))
@@ -674,9 +681,33 @@ mod tests {
     }
 
     #[test]
+    fn cost_mode_prices_known_models_and_counts_the_rest() {
+        let prices = opus_prices();
+        let breakdown = build(Grouping::Model, Metric::Cost, Some(&prices));
+        assert!((breakdown.total.cost_usd - 2.000009).abs() < 1e-9);
+        assert_eq!(breakdown.total.unpriced_tokens, 500_000);
+        let text = render(&breakdown, false, 80);
+        let lines: Vec<_> = text.lines().collect();
+        assert!(lines[0].ends_with("cost"));
+        assert_eq!(lines[3], "  $2.00   2.5M tokens");
+        assert!(lines[9].starts_with("  opus   ●"));
+        assert!(lines[9].ends_with("$2.00   100%"));
+        assert!(text.contains("  · Cost for Claude Code is an estimate from public API prices."));
+        assert!(text.contains("  · 500K tokens have no known price and add no cost."));
+        let tokens = render(
+            &build(Grouping::Model, Metric::Tokens, Some(&prices)),
+            false,
+            80,
+        );
+        assert!(tokens.contains("  2.5M tokens   $2.00"));
+        let missing = render(&build(Grouping::Model, Metric::Cost, None), false, 80);
+        assert!(missing.contains("usagi cannot get the price list. 2.5M tokens have no cost."));
+    }
+
+    #[test]
     fn json_has_a_stable_shape() {
         let value: serde_json::Value =
-            serde_json::from_str(&json(&build(Grouping::Harness, Metric::Cost))).unwrap();
+            serde_json::from_str(&json(&build(Grouping::Harness, Metric::Cost, None))).unwrap();
         assert_eq!(value["type"], "cost");
         assert_eq!(value["by"], "harness");
         assert_eq!(value["total"]["tokens"]["input"], 2_499_998);

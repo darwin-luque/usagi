@@ -26,6 +26,7 @@ impl Sandbox {
         for name in [
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "GH_TOKEN",

@@ -8,7 +8,7 @@ mod jsonl;
 mod ledger;
 mod opencode_go;
 mod pi;
-mod remote;
+pub mod remote;
 
 use chrono::{DateTime, Utc};
 

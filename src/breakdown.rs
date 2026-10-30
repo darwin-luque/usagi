@@ -8,7 +8,8 @@ use chrono::{
 use clap::ValueEnum;
 use serde::Serialize;
 
-use crate::history::{Event, Harvest, Past, Tokens};
+use crate::history::{Event, Harvest, History, Past, Tokens};
+use crate::prices::Prices;
 use crate::theme::Rgb;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
@@ -190,11 +191,39 @@ pub struct Breakdown {
     pub total: Amount,
     pub view: View,
     pub harvests: Vec<Harvest>,
+    pub priced: bool,
+    pub recorded: Vec<&'static str>,
+    pub estimated: Vec<&'static str>,
 }
 
 impl Breakdown {
     pub fn shows_cost(&self) -> bool {
-        self.metric == Metric::Cost || self.total.unpriced_tokens == 0
+        self.metric == Metric::Cost || self.priced || self.total.unpriced_tokens == 0
+    }
+}
+
+fn titles(harvests: &[Harvest], recorded: bool) -> Vec<&'static str> {
+    let mut titles = Vec::new();
+    for harvest in harvests {
+        if harvest
+            .events()
+            .iter()
+            .any(|event| event.cost_usd.is_some() == recorded)
+            && !titles.contains(&harvest.title)
+        {
+            titles.push(harvest.title);
+        }
+    }
+    titles
+}
+
+fn price(harvests: &mut [Harvest], prices: &Prices) {
+    for harvest in harvests {
+        if let History::Events(events) = &mut harvest.history {
+            for event in events.iter_mut().filter(|event| event.cost_usd.is_none()) {
+                event.cost_usd = prices.cost(&event.model, event.tokens);
+            }
+        }
     }
 }
 
@@ -211,7 +240,12 @@ impl Request {
         self.until - self.past.duration()
     }
 
-    pub fn build(self, harvests: Vec<Harvest>) -> Breakdown {
+    pub fn build(self, mut harvests: Vec<Harvest>, prices: Option<&Prices>) -> Breakdown {
+        let recorded = titles(&harvests, true);
+        let estimated = titles(&harvests, false);
+        if let Some(prices) = prices {
+            price(&mut harvests, prices);
+        }
         let since = self.since();
         let view = match self.grouping {
             Grouping::Model => View::Ranked(by_model(&harvests, self.metric, self.top)),
@@ -233,6 +267,9 @@ impl Request {
             total: total(&harvests),
             view,
             harvests,
+            priced: prices.is_some(),
+            recorded,
+            estimated,
         }
     }
 }
@@ -337,7 +374,6 @@ pub fn buckets<Tz: TimeZone>(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::history::History;
 
     pub fn at(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text).unwrap().to_utc()
