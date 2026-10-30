@@ -40,12 +40,11 @@ pub fn events(source: &Source, since: DateTime<Utc>) -> History {
     match source {
         Source::Claude { .. } => claude::events(since).into(),
         Source::Codex { home } => codex::events(home.as_deref(), since).into(),
+        Source::Cursor { state_db } => cursor::events(state_db.as_deref(), since).into(),
         Source::OpencodeGo { db, .. } => opencode_go::events(db.as_deref(), since).into(),
         Source::Pi { sessions, .. } => pi::events(sessions.as_deref(), since).into(),
         Source::Hermes { db, .. } => hermes::events(db.as_deref(), since).into(),
-        Source::Cursor { .. } | Source::Copilot { .. } | Source::Command { .. } => {
-            History::Unsupported
-        }
+        Source::Copilot { .. } | Source::Command { .. } => History::Unsupported,
     }
 }
 

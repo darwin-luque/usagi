@@ -5,6 +5,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
 use super::{Detection, remote};
+use crate::history::{Event, Tokens};
 use crate::usage::{Meter, ProbeError, Reset, Span, Usage, Window};
 
 const HINT: &str = "Open Cursor or run cursor-agent once to refresh the login.";
@@ -77,25 +78,103 @@ fn select_login(
         .ok_or_else(|| remote::expired(HINT))
 }
 
-pub fn fetch(state_db: Option<&Path>) -> Result<Usage, ProbeError> {
-    let now = Utc::now();
-    let (token, plan) = select_login(candidates(state_db), now)?;
+const PAGE_SIZE: usize = 1000;
+
+fn post(token: &str, method: &str, body: String) -> Result<Value, ProbeError> {
     let value = remote::response(
         remote::agent()
-            .post("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
+            .post(format!(
+                "https://api2.cursor.sh/aiserver.v1.DashboardService/{method}"
+            ))
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")
             .header("Connect-Protocol-Version", "1")
-            .send("{}"),
+            .send(body),
         HINT,
     )?;
-    parse(&value, plan, now)
+    authenticated(value)
 }
 
-fn parse(value: &Value, plan: Option<String>, _now: DateTime<Utc>) -> Result<Usage, ProbeError> {
+fn authenticated(value: Value) -> Result<Value, ProbeError> {
     if value["code"] == "unauthenticated" {
         return Err(remote::expired(HINT));
     }
+    Ok(value)
+}
+
+pub fn fetch(state_db: Option<&Path>) -> Result<Usage, ProbeError> {
+    let now = Utc::now();
+    let (token, plan) = select_login(candidates(state_db), now)?;
+    let value = post(&token, "GetCurrentPeriodUsage", "{}".into())?;
+    parse(&value, plan, now)
+}
+
+pub fn events(state_db: Option<&Path>, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    let now = Utc::now();
+    let (token, _) = select_login(candidates(state_db), now)?;
+    let mut events = Vec::new();
+    for page in 1.. {
+        let body = serde_json::json!({
+            "startDate": since.timestamp_millis().to_string(),
+            "endDate": now.timestamp_millis().to_string(),
+            "page": page,
+            "pageSize": PAGE_SIZE,
+        });
+        let (batch, total) =
+            parse_events(&post(&token, "GetFilteredUsageEvents", body.to_string())?)?;
+        let done = batch.len() < PAGE_SIZE || events.len() + batch.len() >= total;
+        events.extend(batch);
+        if done {
+            break;
+        }
+    }
+    Ok(events)
+}
+
+fn number(value: &Value) -> f64 {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .unwrap_or(0.0)
+}
+
+fn parse_events(value: &Value) -> Result<(Vec<Event>, usize), ProbeError> {
+    let items = match value.get("usageEventsDisplay") {
+        None => &Vec::new(),
+        Some(items) => items
+            .as_array()
+            .ok_or_else(|| remote::parse_error("Usage events are not a list."))?,
+    };
+    let events = items
+        .iter()
+        .filter_map(|item| {
+            let usage = item.get("tokenUsage").filter(|usage| usage.is_object());
+            let cents = match usage {
+                Some(usage) => number(&usage["totalCents"]),
+                None => number(&item["chargedCents"]),
+            };
+            let count = |name: &str| usage.map_or(0, |usage| number(&usage[name]) as u64);
+            Some(Event {
+                at: DateTime::from_timestamp_millis(
+                    item["timestamp"]
+                        .as_i64()
+                        .or_else(|| item["timestamp"].as_str()?.parse().ok())?,
+                )?,
+                model: item["model"].as_str().unwrap_or("unknown").to_owned(),
+                tokens: Tokens {
+                    input: count("inputTokens"),
+                    output: count("outputTokens"),
+                    cache_read: count("cacheReadTokens"),
+                    cache_write: count("cacheWriteTokens"),
+                },
+                cost_usd: Some(cents / 100.0),
+            })
+        })
+        .collect();
+    Ok((events, number(&value["totalUsageEventsCount"]) as usize))
+}
+
+fn parse(value: &Value, plan: Option<String>, _now: DateTime<Utc>) -> Result<Usage, ProbeError> {
     let plan_usage = value["planUsage"]
         .as_object()
         .ok_or_else(|| remote::parse_error("Plan usage is missing."))?;
@@ -209,9 +288,10 @@ mod tests {
     #[test]
     fn unauthenticated_body_needs_a_refresh() {
         assert_eq!(
-            parse(&json!({"code":"unauthenticated"}), None, Utc::now()),
+            authenticated(json!({"code":"unauthenticated"})),
             Err(remote::expired(HINT))
         );
+        assert_eq!(authenticated(json!({})), Ok(json!({})));
     }
 
     #[test]
@@ -242,8 +322,53 @@ mod tests {
     }
 
     #[test]
+    fn usage_events_keep_reported_cost_and_missing_numbers_mean_zero() {
+        let value = json!({"totalUsageEventsCount": 3, "usageEventsDisplay": [
+            {"timestamp":"1793334169846","model":"claude-opus-5-5-medium","chargedCents":999,
+             "tokenUsage":{"inputTokens":60,"outputTokens":21260,"cacheWriteTokens":191165,
+             "cacheReadTokens":1466454,"totalCents":167.5}},
+            {"timestamp":"1788484405393","model":"cursor-grok-4.6-high-fast","chargedCents":4},
+            {"timestamp":"bad","model":"skip"}
+        ]});
+        let (events, total) = parse_events(&value).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(
+            events,
+            vec![
+                Event {
+                    at: DateTime::from_timestamp_millis(1793334169846).unwrap(),
+                    model: "claude-opus-5-5-medium".into(),
+                    tokens: Tokens {
+                        input: 60,
+                        output: 21260,
+                        cache_read: 1466454,
+                        cache_write: 191165
+                    },
+                    cost_usd: Some(1.675),
+                },
+                Event {
+                    at: DateTime::from_timestamp_millis(1788484405393).unwrap(),
+                    model: "cursor-grok-4.6-high-fast".into(),
+                    tokens: Tokens::default(),
+                    cost_usd: Some(0.04),
+                },
+            ]
+        );
+        assert_eq!(parse_events(&json!({})).unwrap(), (vec![], 0));
+        assert!(parse_events(&json!({"usageEventsDisplay": 1})).is_err());
+    }
+
+    #[test]
     #[ignore]
     fn live_fetch_smoke() {
         println!("Cursor: {:?}", fetch(None));
+    }
+
+    #[test]
+    #[ignore]
+    fn live_events_smoke() {
+        let events = events(None, Utc::now() - chrono::Duration::days(30)).unwrap();
+        println!("Cursor events: {}", events.len());
+        assert!(!events.is_empty());
     }
 }
