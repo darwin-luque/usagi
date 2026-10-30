@@ -1,11 +1,10 @@
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{
-    Detection,
+    Detection, jsonl,
     ledger::{self, HORIZON, Spend},
 };
 use crate::config::Limits;
@@ -22,45 +21,18 @@ fn sessions_path(path: Option<&Path>) -> PathBuf {
 
 pub fn fetch(path: Option<&Path>, limits: &Limits) -> Result<Usage, ProbeError> {
     let now = Utc::now();
-    let mut lines = Vec::new();
-    read_sessions(&sessions_path(path), now, &mut lines)?;
+    let lines = read_sessions(&sessions_path(path), now - HORIZON)?;
     parse_lines(&lines, limits, now)
 }
 
-fn read_sessions(
-    path: &Path,
-    now: DateTime<Utc>,
-    lines: &mut Vec<String>,
-) -> Result<(), ProbeError> {
-    let read = || -> std::io::Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            let path = entry.path();
-            if kind.is_dir() {
-                read_sessions(&path, now, lines).map_err(std::io::Error::other)?;
-            } else if kind.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl")
-            {
-                let modified: DateTime<Utc> = entry.metadata()?.modified()?.into();
-                if modified < now - HORIZON {
-                    continue;
-                }
-                let file = std::fs::File::open(path)?;
-                for line in BufReader::new(file).lines() {
-                    match line {
-                        Ok(line) => lines.push(line),
-                        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
+fn read_sessions(path: &Path, since: DateTime<Utc>) -> Result<Vec<String>, ProbeError> {
+    let read = || -> std::io::Result<Vec<String>> {
+        let mut lines = Vec::new();
+        for file in jsonl::files(path, since)? {
+            jsonl::lines(&file, |line| lines.push(line.to_owned()))?;
         }
-        Ok(())
+        Ok(lines)
     };
-    let mut read = read;
     read().map_err(|error| ProbeError::Parse(format!("Cannot read Pi sessions. {error}")))
 }
 
@@ -168,8 +140,7 @@ mod tests {
         old.set_times(std::fs::FileTimes::new().set_modified((now - Duration::days(31)).into()))
             .unwrap();
         assert!(matches!(detect(Some(&root)), Detection::Ready(_)));
-        let mut lines = Vec::new();
-        read_sessions(&root, now, &mut lines).unwrap();
+        let lines = read_sessions(&root, now - HORIZON).unwrap();
         let usage = parse_lines(&lines, &Limits::default(), now).unwrap();
         for (window, used_usd) in usage.windows.iter().zip([1.5, 3.5, 7.5, 15.5]) {
             assert_eq!(

@@ -4,6 +4,7 @@ mod command;
 mod copilot;
 mod cursor;
 mod hermes;
+mod jsonl;
 mod ledger;
 mod opencode_go;
 mod pi;
