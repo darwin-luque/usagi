@@ -86,17 +86,23 @@ impl<'de> Deserialize<'de> for Span {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Meter {
-    Percent { used: f64 },
-    Spend { used_usd: f64, limit_usd: Option<f64> },
+    Percent {
+        used: f64,
+    },
+    Spend {
+        used_usd: f64,
+        limit_usd: Option<f64>,
+    },
 }
 
 impl Meter {
     pub fn percent(self) -> Option<f64> {
         match self {
             Meter::Percent { used } => Some(used),
-            Meter::Spend { used_usd, limit_usd: Some(limit) } if limit > 0.0 => {
-                Some(used_usd / limit * 100.0)
-            }
+            Meter::Spend {
+                used_usd,
+                limit_usd: Some(limit),
+            } if limit > 0.0 => Some(used_usd / limit * 100.0),
             Meter::Spend { .. } => None,
         }
     }
@@ -139,7 +145,10 @@ impl From<Window> for WireWindow {
     fn from(window: Window) -> WireWindow {
         let (spend_usd, limit_usd) = match window.meter {
             Meter::Percent { .. } => (None, None),
-            Meter::Spend { used_usd, limit_usd } => (Some(used_usd), limit_usd),
+            Meter::Spend {
+                used_usd,
+                limit_usd,
+            } => (Some(used_usd), limit_usd),
         };
         WireWindow {
             span: window.span,
@@ -161,7 +170,10 @@ impl TryFrom<WireWindow> for Window {
 
     fn try_from(wire: WireWindow) -> Result<Window, String> {
         let meter = match (wire.spend_usd, wire.used_percent) {
-            (Some(used_usd), _) => Meter::Spend { used_usd, limit_usd: wire.limit_usd },
+            (Some(used_usd), _) => Meter::Spend {
+                used_usd,
+                limit_usd: wire.limit_usd,
+            },
             (None, Some(used)) => Meter::Percent { used },
             (None, None) => {
                 return Err(format!(
@@ -175,7 +187,12 @@ impl TryFrom<WireWindow> for Window {
             (None, true) => Reset::Rolling,
             (None, false) => Reset::Unknown,
         };
-        Ok(Window { span: wire.span, scope: wire.scope, meter, reset })
+        Ok(Window {
+            span: wire.span,
+            scope: wire.scope,
+            meter,
+            reset,
+        })
     }
 }
 
@@ -223,7 +240,9 @@ impl fmt::Display for ProbeError {
         match self {
             ProbeError::MissingCredentials { hint } => write!(f, "No credentials found. {hint}"),
             ProbeError::ExpiredCredentials { hint } => write!(f, "Credentials expired. {hint}"),
-            ProbeError::Http { status, detail } => write!(f, "Server sent status {status}. {detail}"),
+            ProbeError::Http { status, detail } => {
+                write!(f, "Server sent status {status}. {detail}")
+            }
             ProbeError::Network(detail) => write!(f, "Network failed. {detail}"),
             ProbeError::Parse(detail) => write!(f, "Response format is not known. {detail}"),
             ProbeError::Command(detail) => write!(f, "Command failed. {detail}"),
@@ -299,7 +318,12 @@ mod tests {
     #[test]
     fn window_without_a_meter_is_rejected() {
         let result: Result<Window, _> = serde_json::from_str(r#"{"span":"5h"}"#);
-        assert!(result.unwrap_err().to_string().contains("used_percent or spend_usd"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("used_percent or spend_usd")
+        );
     }
 
     #[test]
@@ -309,7 +333,10 @@ mod tests {
             windows: vec![Window {
                 span: Span::Week,
                 scope: None,
-                meter: Meter::Spend { used_usd: 1.5, limit_usd: Some(30.0) },
+                meter: Meter::Spend {
+                    used_usd: 1.5,
+                    limit_usd: Some(30.0),
+                },
                 reset: Reset::Unknown,
             }],
             notes: vec![],
@@ -321,7 +348,9 @@ mod tests {
 
     #[test]
     fn pace_is_the_share_of_the_window_that_passed() {
-        let now = DateTime::parse_from_rfc3339("2026-10-30T00:00:00Z").unwrap().to_utc();
+        let now = DateTime::parse_from_rfc3339("2026-10-30T00:00:00Z")
+            .unwrap()
+            .to_utc();
         let window = Window {
             span: Span::FiveHours,
             scope: None,

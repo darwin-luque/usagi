@@ -31,5 +31,9 @@ fn source_code_has_no_comments() {
                 .collect::<Vec<_>>()
         })
         .collect();
-    assert!(offenders.is_empty(), "Remove these comments:\n{}", offenders.join("\n"));
+    assert!(
+        offenders.is_empty(),
+        "Remove these comments:\n{}",
+        offenders.join("\n")
+    );
 }

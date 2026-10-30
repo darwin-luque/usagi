@@ -36,28 +36,39 @@ pub const KINDS: &[KindInfo] = &[
         title: "GitHub Copilot",
         color: Rgb(0x89, 0x57, 0xE5),
         method: "Reads the GitHub CLI token and asks the Copilot quota endpoint.",
-        default_source: || Source::Copilot { token_command: None },
+        default_source: || Source::Copilot {
+            token_command: None,
+        },
     },
     KindInfo {
         name: "opencode-go",
         title: "OpenCode Go",
         color: Rgb(0xF2, 0xC9, 0x4C),
         method: "Adds the cost of each OpenCode Go message in the local OpenCode database.",
-        default_source: || Source::OpencodeGo { db: None, limits: Limits::opencode_go() },
+        default_source: || Source::OpencodeGo {
+            db: None,
+            limits: Limits::opencode_go(),
+        },
     },
     KindInfo {
         name: "pi",
         title: "Pi",
         color: Rgb(0xC6, 0x78, 0xDD),
         method: "Adds the cost of each assistant message in the local Pi session files.",
-        default_source: || Source::Pi { sessions: None, limits: Limits::default() },
+        default_source: || Source::Pi {
+            sessions: None,
+            limits: Limits::default(),
+        },
     },
     KindInfo {
         name: "hermes",
         title: "Hermes Agent",
         color: Rgb(0x56, 0xB6, 0xC2),
         method: "Adds the cost of each session in the local Hermes state database.",
-        default_source: || Source::Hermes { db: None, limits: Limits::default() },
+        default_source: || Source::Hermes {
+            db: None,
+            limits: Limits::default(),
+        },
     },
     KindInfo {
         name: "command",

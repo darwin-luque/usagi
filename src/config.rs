@@ -162,15 +162,77 @@ pub fn path() -> PathBuf {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 impl Config {
+    pub fn add(&mut self, harness: Harness) -> Result<()> {
+        if self.harnesses.iter().any(|item| item.id == harness.id) {
+            bail!(
+                "The id \"{}\" is in use. Use --id to set a new id.",
+                harness.id
+            );
+        }
+        if harness.id.trim().is_empty() {
+            bail!("A harness needs an id.");
+        }
+        self.harnesses.push(harness);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, id: &str) -> Result<Harness> {
+        self.harness_mut(id)?;
+        let index = self
+            .harnesses
+            .iter()
+            .position(|item| item.id == id)
+            .unwrap();
+        Ok(self.harnesses.remove(index))
+    }
+
+    pub fn harness_mut(&mut self, id: &str) -> Result<&mut Harness> {
+        let known = self.known_ids();
+        self.harnesses
+            .iter_mut()
+            .find(|item| item.id == id)
+            .with_context(|| format!("Unknown id \"{id}\". Known ids: {known}."))
+    }
+
+    pub fn enabled(&self, only: &[String]) -> Result<Vec<Harness>> {
+        for id in only {
+            if !self.harnesses.iter().any(|item| item.id == *id) {
+                bail!("Unknown id \"{id}\". Known ids: {}.", self.known_ids());
+            }
+        }
+        Ok(self
+            .harnesses
+            .iter()
+            .filter(|item| item.enabled && (only.is_empty() || only.contains(&item.id)))
+            .cloned()
+            .collect())
+    }
+
+    fn known_ids(&self) -> String {
+        if self.harnesses.is_empty() {
+            "none".into()
+        } else {
+            self.harnesses
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Option<Config>> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).with_context(|| format!("Cannot read {}", path.display())),
+            Err(error) => {
+                return Err(error).with_context(|| format!("Cannot read {}", path.display()));
+            }
         };
         let config: Config =
             toml::from_str(&text).with_context(|| format!("Cannot parse {}", path.display()))?;
@@ -198,7 +260,10 @@ impl Config {
                 bail!("A harness has no id");
             }
             if !seen.insert(harness.id.as_str()) {
-                bail!("Two harnesses use the id \"{}\". Each id must be unique", harness.id);
+                bail!(
+                    "Two harnesses use the id \"{}\". Each id must be unique",
+                    harness.id
+                );
             }
         }
         Ok(())
@@ -235,7 +300,13 @@ run = "echo {}"
         let config: Config = toml::from_str(text).unwrap();
         assert_eq!(config.harnesses.len(), 3);
         assert_eq!(config.harnesses[0].color(), Rgb(0x11, 0x22, 0x33));
-        assert_eq!(config.harnesses[1].source, Source::OpencodeGo { db: None, limits: Limits::opencode_go() });
+        assert_eq!(
+            config.harnesses[1].source,
+            Source::OpencodeGo {
+                db: None,
+                limits: Limits::opencode_go()
+            }
+        );
         assert!(!config.harnesses[1].enabled);
         assert_eq!(config.theme.warn_at, 60.0);
         assert_eq!(config.theme.danger_at, 90.0);
@@ -246,8 +317,77 @@ run = "echo {}"
     #[test]
     fn duplicate_ids_are_rejected() {
         let mut config = Config::default();
-        config.harnesses.push(Harness::new(Source::Codex { home: None }));
-        config.harnesses.push(Harness::new(Source::Codex { home: None }));
+        config
+            .harnesses
+            .push(Harness::new(Source::Codex { home: None }));
+        config
+            .harnesses
+            .push(Harness::new(Source::Codex { home: None }));
         assert!(config.validate().is_err());
+    }
+    #[test]
+    fn add_rejects_used_and_empty_ids_without_changes() {
+        let mut config = Config::default();
+        let harness = Harness::new(Source::Codex { home: None });
+        config.add(harness.clone()).unwrap();
+        let error = config.add(harness.clone()).unwrap_err().to_string();
+        assert!(error.contains("--id"));
+        let mut empty = harness.clone();
+        empty.id = " ".into();
+        assert!(config.add(empty).is_err());
+        assert_eq!(config.harnesses, vec![harness]);
+    }
+
+    #[test]
+    fn remove_returns_the_harness_and_keeps_other_harnesses() {
+        let mut config = Config::default();
+        let codex = Harness::new(Source::Codex { home: None });
+        let claude = Harness::new(Source::Claude { credentials: None });
+        config.add(codex.clone()).unwrap();
+        config.add(claude.clone()).unwrap();
+        assert_eq!(config.remove("codex").unwrap(), codex);
+        assert_eq!(config.harnesses, vec![claude]);
+        let error = config.remove("missing").unwrap_err().to_string();
+        assert!(error.contains("claude"));
+        assert!(error.contains("missing"));
+    }
+
+    #[test]
+    fn harness_mut_changes_the_selected_harness_and_lists_known_ids() {
+        let mut config = Config::default();
+        config
+            .add(Harness::new(Source::Codex { home: None }))
+            .unwrap();
+        config.harness_mut("codex").unwrap().enabled = false;
+        assert!(!config.harnesses[0].enabled);
+        let error = config.harness_mut("missing").unwrap_err().to_string();
+        assert!(error.contains("Known ids: codex"));
+        assert!(
+            Config::default()
+                .harness_mut("missing")
+                .unwrap_err()
+                .to_string()
+                .contains("Known ids: none")
+        );
+    }
+
+    #[test]
+    fn enabled_filters_ids_and_skips_disabled_harnesses() {
+        let mut config = Config::default();
+        let codex = Harness::new(Source::Codex { home: None });
+        config.add(codex.clone()).unwrap();
+        config
+            .add(Harness::new(Source::Claude { credentials: None }))
+            .unwrap();
+        config.harness_mut("claude").unwrap().enabled = false;
+        assert_eq!(config.enabled(&[]).unwrap(), vec![codex.clone()]);
+        assert_eq!(
+            config.enabled(&["codex".into(), "codex".into()]).unwrap(),
+            vec![codex]
+        );
+        assert!(config.enabled(&["claude".into()]).unwrap().is_empty());
+        let error = config.enabled(&["missing".into()]).unwrap_err().to_string();
+        assert!(error.contains("codex, claude"));
+        assert!(error.contains("missing"));
     }
 }
