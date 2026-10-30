@@ -172,7 +172,12 @@ fn parse_events(value: &Value) -> Result<(Vec<Event>, usize), ProbeError> {
                         .as_i64()
                         .or_else(|| item["timestamp"].as_str()?.parse().ok())?,
                 )?,
-                model: item["model"].as_str().unwrap_or("unknown").to_owned(),
+                model: match item["model"].as_str() {
+                    Some("default") => "auto",
+                    Some(model) => model,
+                    None => "unknown",
+                }
+                .to_owned(),
                 tokens: Tokens {
                     input: count("inputTokens"),
                     output: count("outputTokens"),
@@ -340,10 +345,12 @@ mod tests {
              "tokenUsage":{"inputTokens":60,"outputTokens":21260,"cacheWriteTokens":191165,
              "cacheReadTokens":1466454,"totalCents":167.5}},
             {"timestamp":"1788484405393","model":"cursor-grok-4.6-high-fast","chargedCents":4},
-            {"timestamp":"bad","model":"skip"}
+            {"timestamp":"bad","model":"skip"},
+            {"timestamp":"1788484405394","model":"default","chargedCents":0}
         ]});
-        let (events, total) = parse_events(&value).unwrap();
+        let (mut events, total) = parse_events(&value).unwrap();
         assert_eq!(total, 3);
+        assert_eq!(events.pop().unwrap().model, "auto");
         assert_eq!(
             events,
             vec![
