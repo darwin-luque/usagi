@@ -138,7 +138,8 @@ impl Step {
     pub fn short_label(self, start: NaiveDateTime) -> String {
         let format = match self {
             Step::Hour => "%a %H:%M",
-            Step::Day | Step::Week => "%b %d",
+            Step::Day => "%b %d",
+            Step::Week => "%b %d %Y",
             Step::Month => "%b %Y",
         };
         start.format(format).to_string()
@@ -514,6 +515,7 @@ pub(crate) mod tests {
             &Utc,
         );
         assert_eq!(Step::Week.label(weeks[0].start), "2026-09-28");
+        assert_eq!(Step::Week.short_label(weeks[0].start), "Sep 28 2026");
         assert_eq!(weeks.len(), 4);
         assert_eq!(weeks[0].total().tokens.total(), 162);
         let months = buckets(
