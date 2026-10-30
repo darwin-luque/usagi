@@ -16,10 +16,15 @@ pub fn probe(harness: &Harness) -> Report {
 }
 
 pub fn probe_all(harnesses: &[Harness]) -> Vec<Report> {
+    each(harnesses, probe)
+}
+
+pub fn each<T: Send>(harnesses: &[Harness], read: impl Fn(&Harness) -> T + Sync) -> Vec<T> {
+    let read = &read;
     std::thread::scope(|scope| {
         let handles: Vec<_> = harnesses
             .iter()
-            .map(|harness| scope.spawn(move || probe(harness)))
+            .map(|harness| scope.spawn(move || read(harness)))
             .collect();
         handles
             .into_iter()

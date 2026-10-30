@@ -26,6 +26,7 @@ impl Sandbox {
         for name in [
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
             "GH_TOKEN",
@@ -235,6 +236,79 @@ fn config_edit_uses_visual_and_checks_the_saved_file() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("refresh_seconds must be 15 or more"));
     assert_eq!(sandbox.text(), "refresh_seconds = 1\n");
+}
+
+#[test]
+fn breakdown_json_adds_local_claude_and_codex_tokens() {
+    let sandbox = Sandbox::new();
+    for kind in ["claude", "codex", "copilot"] {
+        sandbox.success(&["add", kind]);
+    }
+    let time = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let claude = sandbox.directory.join(".claude/projects/demo");
+    std::fs::create_dir_all(&claude).unwrap();
+    let message = format!(
+        r#"{{"type":"assistant","requestId":"r1","timestamp":"{time}","message":{{"id":"m1","model":"claude-opus-5-5","usage":{{"input_tokens":2,"output_tokens":10,"cache_read_input_tokens":300,"cache_creation_input_tokens":40}}}}}}"#
+    );
+    std::fs::write(claude.join("s.jsonl"), format!("{message}\n{message}\n")).unwrap();
+    let codex = sandbox.directory.join(".codex/sessions/2026/10/29");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::write(
+        codex.join("rollout-demo.jsonl"),
+        format!(
+            "{}\n{}\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol"}}"#,
+            format_args!(
+                r#"{{"timestamp":"{time}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":1000,"cached_input_tokens":400,"cache_write_input_tokens":0,"output_tokens":50}}}}}}}}"#
+            )
+        ),
+    )
+    .unwrap();
+    let output = sandbox.success(&[
+        "breakdown",
+        "--only",
+        "claude",
+        "--only",
+        "codex",
+        "--only",
+        "copilot",
+        "--json",
+    ]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["total"]["tokens"],
+        serde_json::json!({"input":602,"output":60,"cache_read":700,"cache_write":40,"total":1402})
+    );
+    assert_eq!(value["rows"][0]["label"], "gpt-6.1-sol");
+    assert_eq!(value["rows"][1]["label"], "claude-opus-5-5");
+    let statuses: Vec<_> = value["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|harness| {
+            (
+                harness["id"].as_str().unwrap(),
+                harness["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("claude", "ok"),
+            ("codex", "ok"),
+            ("copilot", "unsupported")
+        ]
+    );
+    let output = sandbox.success(&["breakdown", "--by", "day", "--past", "2d"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Breakdown  last 2 days  tokens"));
+    assert!(text.contains("Each hour"));
+    assert!(text.contains("By hour"));
+    assert!(text.contains("● copilot  no token history"));
+    let output = sandbox.run(&["breakdown", "--past", "2fortnights"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("24h, 30d"));
 }
 
 #[test]

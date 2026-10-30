@@ -57,6 +57,7 @@ Each [release](https://github.com/darwin-luque/usagi/releases) also has binaries
 | `usagi usage --raw` | Prints one line per window: id, span, percent, and reset time as Unix seconds, with tabs between them. |
 | `usagi usage --json` | Prints all data as JSON. |
 | `usagi usage --only claude --only codex` | Checks only these harnesses. |
+| `usagi breakdown` | Shows the tokens you used per model in the last 30 days. Use `--type`, `--past`, `--by`, `--top`, `--only`, and `--json`. |
 | `usagi init` | Finds the installed harnesses and writes the config file. |
 | `usagi list` | Shows your harnesses and all supported kinds. |
 | `usagi add <kind>` | Adds a harness. Use `--id`, `--color`, and `--run` (for `command`). |
@@ -64,6 +65,33 @@ Each [release](https://github.com/darwin-luque/usagi/releases) also has binaries
 | `usagi enable <id>`, `usagi disable <id>` | Turns a harness on or off and keeps its settings. |
 | `usagi color <id> <#RRGGBB>` | Sets the color of a harness. `default` sets the kind color again. |
 | `usagi config path`, `show`, `edit` | Prints, shows, or edits the config file. |
+
+## See how you used your harnesses
+
+`usagi breakdown` reads the token history of your harnesses. It shows, in this order:
+
+1. The total.
+2. A summary per harness with its share and its top model.
+3. The split into input, output, cache read, and cache write.
+4. A chart of use over time, stacked by harness color.
+5. A ranked list by model, or a list per day.
+
+```sh
+usagi breakdown                       # tokens per model, last 30 days
+usagi breakdown --type cost           # rank by cost
+usagi breakdown --by day --past 24h   # one column and one row per hour
+usagi breakdown --past 1y
+usagi breakdown --json
+```
+
+- `--type` is `tokens` or `cost`. The default is `tokens`.
+- `--past` is a number and a unit, like `10s`, `90m`, `24h`, `30d`, `2weeks`, `3mo`, or `1y`. `m` means minutes and `mo` means months. A month is 30 days and a year is 365 days. The default is `30d`.
+- `--by` is `model` or `day`. The default is `model`. The chart and the `day` list use a column size that follows `--past`: hours up to 48 hours, days up to 92 days, weeks up to 2 years, and months after that.
+- `--top` sets the number of rows. The rest go into one `other` row. The default is 10.
+
+Cursor, OpenCode, Pi, and Hermes record the cost of each call. For Claude Code and Codex, usagi estimates the cost from the public API prices in the [LiteLLM price list](https://github.com/BerriAI/litellm). Subscription plans are not billed this way, so the estimate shows what the same tokens cost on the API. GitHub Copilot and `command` harnesses have no token history.
+
+The [harness map](docs/harnesses.md) tells where each harness keeps its token history.
 
 ## Use raw output in scripts
 
@@ -105,3 +133,5 @@ After each merge, [release-please](https://github.com/googleapis/release-please)
 ## Privacy
 
 usagi reads your login tokens only to call the usage endpoint of the same service. It does not write, refresh, or send tokens anywhere else. It does not store usage data.
+
+`usagi breakdown --type cost` downloads the public LiteLLM price list and keeps a copy in `~/.cache/usagi/prices.json` (`XDG_CACHE_HOME` moves it). It downloads the list again after 24 hours. The copy has prices only. usagi still stores no usage data.

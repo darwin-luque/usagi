@@ -8,6 +8,7 @@ use super::{
     ledger::{self, Spend},
 };
 use crate::config::Limits;
+use crate::history::{Event, Tokens};
 use crate::usage::{ProbeError, Usage};
 
 fn database_path(path: Option<&Path>) -> PathBuf {
@@ -19,10 +20,117 @@ fn database_path(path: Option<&Path>) -> PathBuf {
     })
 }
 
+fn open(path: Option<&Path>) -> Result<Connection, ProbeError> {
+    Connection::open_with_flags(database_path(path), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| ProbeError::Parse(error.to_string()))
+}
+
+struct Columns(Vec<String>);
+
+impl Columns {
+    fn read(db: &Connection) -> rusqlite::Result<Columns> {
+        let mut statement = db.prepare("PRAGMA table_info(sessions)")?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Columns(names))
+    }
+
+    fn first(&self, names: &[&str], fallback: &str) -> String {
+        let present: Vec<_> = names
+            .iter()
+            .copied()
+            .filter(|name| self.0.iter().any(|column| column == name))
+            .collect();
+        match present.as_slice() {
+            [] => fallback.into(),
+            [name] => (*name).to_string(),
+            _ => format!("COALESCE({})", present.join(", ")),
+        }
+    }
+
+    fn time(&self) -> String {
+        self.first(&["last_activity_at", "ended_at", "started_at"], "NULL")
+    }
+
+    fn cost(&self) -> String {
+        self.first(&["actual_cost_usd", "estimated_cost_usd"], "NULL")
+    }
+}
+
+fn session_time(at: f64) -> Option<DateTime<Utc>> {
+    let milliseconds = if at > 1e12 { at } else { at * 1000.0 };
+    if !milliseconds.is_finite()
+        || milliseconds < i64::MIN as f64
+        || milliseconds >= i64::MAX as f64
+    {
+        return None;
+    }
+    DateTime::from_timestamp_millis(milliseconds as i64)
+}
+
 pub fn fetch(path: Option<&Path>, limits: &Limits) -> Result<Usage, ProbeError> {
-    let db = Connection::open_with_flags(database_path(path), OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| ProbeError::Parse(error.to_string()))?;
-    read_database(&db, limits, Utc::now())
+    read_database(&open(path)?, limits, Utc::now())
+}
+
+pub fn events(path: Option<&Path>, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    read_events(&open(path)?, since)
+}
+
+type SessionRow = (Option<f64>, Option<String>, [Option<i64>; 5], Option<f64>);
+
+fn read_events(db: &Connection, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    let read = || -> rusqlite::Result<Vec<SessionRow>> {
+        let columns = Columns::read(db)?;
+        let count = |name: &str| format!("CAST({} AS INTEGER)", columns.first(&[name], "0"));
+        let sql = format!(
+            "SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM sessions",
+            columns.time(),
+            columns.first(&["model"], "NULL"),
+            count("input_tokens"),
+            count("output_tokens"),
+            count("reasoning_tokens"),
+            count("cache_read_tokens"),
+            count("cache_write_tokens"),
+            columns.cost(),
+        );
+        let mut statement = db.prepare(&sql)?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    [
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ],
+                    row.get(7)?,
+                ))
+            })?
+            .collect()
+    };
+    Ok(read()
+        .map_err(|error| ProbeError::Parse(error.to_string()))?
+        .into_iter()
+        .filter_map(|(at, model, counts, cost_usd)| {
+            let [input, output, reasoning, cache_read, cache_write] =
+                counts.map(|count| count.unwrap_or(0).max(0) as u64);
+            Some(Event {
+                at: session_time(at?).filter(|at| *at >= since)?,
+                model: model.unwrap_or_else(|| "unknown".into()),
+                tokens: Tokens {
+                    input,
+                    output: output + reasoning,
+                    cache_read,
+                    cache_write,
+                },
+                cost_usd,
+            })
+        })
+        .collect())
 }
 
 fn read_database(
@@ -31,24 +139,9 @@ fn read_database(
     now: DateTime<Utc>,
 ) -> Result<Usage, ProbeError> {
     let read = || -> rusqlite::Result<Vec<(Option<f64>, f64)>> {
-        let mut statement = db.prepare("PRAGMA table_info(sessions)")?;
-        let columns = statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let expression = |names: &[&str]| {
-            let present: Vec<_> = names
-                .iter()
-                .copied()
-                .filter(|name| columns.iter().any(|column| column == name))
-                .collect();
-            match present.as_slice() {
-                [] => "NULL".into(),
-                [name] => (*name).to_string(),
-                _ => format!("COALESCE({})", present.join(", ")),
-            }
-        };
-        let at = expression(&["last_activity_at", "ended_at", "started_at"]);
-        let cost = expression(&["actual_cost_usd", "estimated_cost_usd"]);
+        let columns = Columns::read(db)?;
+        let at = columns.time();
+        let cost = columns.cost();
         let mut statement = db.prepare(&format!(
             "SELECT {at}, {cost} FROM sessions WHERE {cost} IS NOT NULL"
         ))?;
@@ -72,14 +165,7 @@ fn parse_rows(
         .iter()
         .map(|&(at, usd)| {
             let at = at.ok_or_else(|| ProbeError::Parse("The session has no time.".into()))?;
-            let milliseconds = if at > 1e12 { at } else { at * 1000.0 };
-            if !milliseconds.is_finite()
-                || milliseconds < i64::MIN as f64
-                || milliseconds >= i64::MAX as f64
-            {
-                return Err(ProbeError::Parse("The session time is not valid.".into()));
-            }
-            DateTime::from_timestamp_millis(milliseconds as i64)
+            session_time(at)
                 .map(|at| Spend { at, usd })
                 .ok_or_else(|| ProbeError::Parse("The session time is not valid.".into()))
         })
@@ -120,7 +206,8 @@ mod tests {
 
     fn check_database(actual_column: bool) {
         let path = std::env::temp_dir().join(format!(
-            "usagi-hermes-{}-{}.db",
+            "usagi-hermes-{}-{}-{}.db",
+            actual_column,
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap()
         ));

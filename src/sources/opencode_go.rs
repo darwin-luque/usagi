@@ -8,6 +8,7 @@ use super::{
     ledger::{self, HORIZON, Spend},
 };
 use crate::config::Limits;
+use crate::history::{Event, Tokens};
 use crate::usage::{ProbeError, Usage};
 
 fn database_path(path: Option<&Path>) -> PathBuf {
@@ -15,10 +16,62 @@ fn database_path(path: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| ledger::default_data_home().join("opencode/opencode.db"))
 }
 
+fn open(path: Option<&Path>) -> Result<Connection, ProbeError> {
+    Connection::open_with_flags(database_path(path), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| ProbeError::Parse(error.to_string()))
+}
+
+fn is_v2(db: &Connection) -> rusqlite::Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_message')",
+        [],
+        |row| row.get(0),
+    )
+}
+
 pub fn fetch(path: Option<&Path>, limits: &Limits) -> Result<Usage, ProbeError> {
-    let db = Connection::open_with_flags(database_path(path), OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| ProbeError::Parse(error.to_string()))?;
-    read_database(&db, limits, Utc::now())
+    read_database(&open(path)?, limits, Utc::now())
+}
+
+pub fn events(path: Option<&Path>, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    read_events(&open(path)?, since)
+}
+
+type MessageRow = (i64, Option<String>, Option<String>, Option<f64>);
+
+fn read_events(db: &Connection, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    let read = || -> rusqlite::Result<Vec<MessageRow>> {
+        let sql = if is_v2(db)? {
+            "SELECT time_created, json_extract(data, '$.model.id'), json_extract(data, '$.tokens'), json_extract(data, '$.cost') FROM session_message WHERE type = 'assistant' AND time_created >= ?1"
+        } else {
+            "SELECT time_created, json_extract(data, '$.modelID'), json_extract(data, '$.tokens'), json_extract(data, '$.cost') FROM message WHERE time_created >= ?1 AND json_extract(data, '$.role') = 'assistant'"
+        };
+        let mut statement = db.prepare(sql)?;
+        statement
+            .query_map([since.timestamp_millis()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect()
+    };
+    Ok(read()
+        .map_err(|error| ProbeError::Parse(error.to_string()))?
+        .into_iter()
+        .filter_map(|(at, model, tokens, cost_usd)| {
+            let tokens: serde_json::Value = serde_json::from_str(tokens.as_deref()?).ok()?;
+            let count = |value: &serde_json::Value| value.as_u64().unwrap_or(0);
+            Some(Event {
+                at: DateTime::from_timestamp_millis(at)?,
+                model: model.unwrap_or_else(|| "unknown".into()),
+                tokens: Tokens {
+                    input: count(&tokens["input"]),
+                    output: count(&tokens["output"]) + count(&tokens["reasoning"]),
+                    cache_read: count(&tokens["cache"]["read"]),
+                    cache_write: count(&tokens["cache"]["write"]),
+                },
+                cost_usd,
+            })
+        })
+        .collect())
 }
 
 fn read_database(
@@ -27,8 +80,7 @@ fn read_database(
     now: DateTime<Utc>,
 ) -> Result<Usage, ProbeError> {
     let read = || -> rusqlite::Result<Vec<(i64, f64)>> {
-        let v2: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_message')", [], |row| row.get(0))?;
-        let sql = if v2 {
+        let sql = if is_v2(db)? {
             "SELECT time_created, json_extract(data, '$.cost') FROM session_message WHERE type = 'assistant' AND json_extract(data, '$.model.providerID') = 'opencode-go' AND time_created >= ?1 AND json_extract(data, '$.cost') IS NOT NULL"
         } else {
             "SELECT time_created, json_extract(data, '$.cost') FROM message WHERE json_extract(data, '$.role') = 'assistant' AND json_extract(data, '$.providerID') = 'opencode-go' AND time_created >= ?1 AND json_extract(data, '$.cost') IS NOT NULL"
@@ -186,6 +238,78 @@ mod tests {
                 used_usd: 2.5,
                 limit_usd: Some(12.0)
             }
+        );
+    }
+
+    #[test]
+    fn events_read_tokens_from_every_provider_in_v1_and_v2() {
+        let since = Utc::now() - Duration::days(1);
+        let fixture = include_str!("../../tests/fixtures/opencode_session_message.json");
+        let v2 = Connection::open_in_memory().unwrap();
+        v2.execute_batch("CREATE TABLE session_message(type TEXT, time_created INTEGER, data TEXT); CREATE TABLE message(time_created INTEGER, data TEXT);").unwrap();
+        for (kind, hours, data) in [
+            ("assistant", -1, fixture),
+            (
+                "assistant",
+                -1,
+                r#"{"model":{"id":"other-model","providerID":"anthropic"},"tokens":{"input":5}}"#,
+            ),
+            ("assistant", -48, fixture),
+            ("user", -1, fixture),
+        ] {
+            v2.execute(
+                "INSERT INTO session_message VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    kind,
+                    (Utc::now() + Duration::hours(hours)).timestamp_millis(),
+                    data
+                ],
+            )
+            .unwrap();
+        }
+        let events = read_events(&v2, since).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].model, "glm-5.3-flash");
+        assert_eq!(
+            events[0].tokens,
+            Tokens {
+                input: 38205,
+                output: 1632 + 4130,
+                cache_read: 5440,
+                cache_write: 0
+            }
+        );
+        assert_eq!(events[0].cost_usd, Some(0.00877495));
+        assert_eq!(events[1].model, "other-model");
+        assert_eq!(events[1].tokens.total(), 5);
+        assert_eq!(events[1].cost_usd, None);
+
+        let v1 = Connection::open_in_memory().unwrap();
+        v1.execute_batch("CREATE TABLE message(time_created INTEGER, data TEXT);")
+            .unwrap();
+        for data in [
+            r#"{"role":"assistant","modelID":"kimi","providerID":"x","cost":1.5,"tokens":{"input":1,"output":2,"reasoning":3,"cache":{"read":4,"write":5}}}"#,
+            r#"{"role":"user","modelID":"kimi","tokens":{"input":99}}"#,
+        ] {
+            v1.execute(
+                "INSERT INTO message VALUES (?1, ?2)",
+                rusqlite::params![Utc::now().timestamp_millis(), data],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            read_events(&v1, since).unwrap(),
+            vec![Event {
+                at: read_events(&v1, since).unwrap()[0].at,
+                model: "kimi".into(),
+                tokens: Tokens {
+                    input: 1,
+                    output: 5,
+                    cache_read: 4,
+                    cache_write: 5
+                },
+                cost_usd: Some(1.5),
+            }]
         );
     }
 
