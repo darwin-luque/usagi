@@ -34,6 +34,7 @@ The harnesses do not share one usage format. usagi converts each format into one
 - **Response:** `five_hour` and `seven_day` objects with `utilization` (percent) and `resets_at`. Plans with model limits also send `seven_day_opus` or `seven_day_sonnet`. `extra_usage` shows paid extra usage.
 - **Login expiry:** Claude Code refreshes its own token. usagi does not refresh it. If the token expired, run `claude` once.
 - **Token history:** `usagi breakdown` reads the session files in `~/.claude/projects/**/*.jsonl`, subagent files included. `CLAUDE_CONFIG_DIR` moves the folder. Each assistant message has `message.usage`. Claude Code writes a message once per content block, so usagi counts each `message.id` and `requestId` pair once. The files have no cost, so usagi estimates it from public API prices.
+- **Known gap:** usagi prices all cache writes at the 5-minute cache rate. Claude Code often writes to the 1-hour cache, which costs more (`message.usage.cache_creation.ephemeral_1h_input_tokens`). So the Claude cost estimate is low when a session uses the 1-hour cache. A fix would count 1-hour cache writes on their own and price them with `cache_creation_input_token_cost_above_1hr` from the price list.
 
 ## Codex
 
