@@ -303,8 +303,9 @@ fn breakdown_json_adds_local_claude_and_codex_tokens() {
     let output = sandbox.success(&["breakdown", "--by", "day", "--past", "2d"]);
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("Breakdown  last 2 days  tokens"));
+    assert!(text.contains("Each hour"));
     assert!(text.contains("By hour"));
-    assert!(text.contains("No token history for copilot."));
+    assert!(text.contains("● copilot  no token history"));
     let output = sandbox.run(&["breakdown", "--past", "2fortnights"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("24h, 30d"));

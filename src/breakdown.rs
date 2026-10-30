@@ -24,7 +24,6 @@ pub enum Metric {
 pub enum Grouping {
     Model,
     Day,
-    Harness,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -162,25 +161,10 @@ impl Bucket {
     }
 }
 
-pub enum View {
-    Ranked(Vec<Row>),
-    Timeline { step: Step, buckets: Vec<Bucket> },
-}
-
-impl View {
-    pub fn rows(&self) -> Vec<Row> {
-        match self {
-            View::Ranked(rows) => rows.clone(),
-            View::Timeline { step, buckets } => buckets
-                .iter()
-                .map(|bucket| Row {
-                    label: step.label(bucket.start),
-                    colors: Vec::new(),
-                    amount: bucket.total(),
-                })
-                .collect(),
-        }
-    }
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summary {
+    pub amount: Amount,
+    pub top_model: Option<String>,
 }
 
 pub struct Breakdown {
@@ -190,7 +174,10 @@ pub struct Breakdown {
     pub metric: Metric,
     pub grouping: Grouping,
     pub total: Amount,
-    pub view: View,
+    pub summary: Vec<Summary>,
+    pub step: Step,
+    pub buckets: Vec<Bucket>,
+    pub rows: Vec<Row>,
     pub harvests: Vec<Harvest>,
     pub priced: bool,
     pub recorded: Vec<&'static str>,
@@ -248,16 +235,11 @@ impl Request {
             price(&mut harvests, prices);
         }
         let since = self.since();
-        let view = match self.grouping {
-            Grouping::Model => View::Ranked(by_model(&harvests, self.metric, self.top)),
-            Grouping::Harness => View::Ranked(by_harness(&harvests, self.metric, self.top)),
-            Grouping::Day => {
-                let step = Step::for_span(self.past.duration());
-                View::Timeline {
-                    step,
-                    buckets: buckets(&harvests, since, self.until, step, &Local),
-                }
-            }
+        let step = Step::for_span(self.past.duration());
+        let buckets = buckets(&harvests, since, self.until, step, &Local);
+        let rows = match self.grouping {
+            Grouping::Model => by_model(&harvests, self.metric, self.top),
+            Grouping::Day => by_bucket(&harvests, &buckets, step),
         };
         Breakdown {
             past: self.past,
@@ -266,7 +248,10 @@ impl Request {
             metric: self.metric,
             grouping: self.grouping,
             total: total(&harvests),
-            view,
+            summary: summary(&harvests, self.metric),
+            step,
+            buckets,
+            rows,
             harvests,
             priced: prices.is_some(),
             recorded,
@@ -297,20 +282,34 @@ pub fn by_model(harvests: &[Harvest], metric: Metric, top: usize) -> Vec<Row> {
     rank(rows.into_values().collect(), metric, top)
 }
 
-pub fn by_harness(harvests: &[Harvest], metric: Metric, top: usize) -> Vec<Row> {
-    let rows = harvests
+pub fn summary(harvests: &[Harvest], metric: Metric) -> Vec<Summary> {
+    harvests
         .iter()
-        .filter(|harvest| !harvest.events().is_empty())
-        .map(|harvest| {
-            let mut row = Row::new(harvest.id.clone());
-            row.add_color(harvest.color);
-            for event in harvest.events() {
-                row.amount.add(event);
+        .map(|harvest| Summary {
+            amount: total(std::slice::from_ref(harvest)),
+            top_model: by_model(std::slice::from_ref(harvest), metric, 1)
+                .into_iter()
+                .next()
+                .map(|row| row.label),
+        })
+        .collect()
+}
+
+pub fn by_bucket(harvests: &[Harvest], buckets: &[Bucket], step: Step) -> Vec<Row> {
+    buckets
+        .iter()
+        .filter(|bucket| bucket.total().tokens.total() > 0 || bucket.total().cost_usd > 0.0)
+        .map(|bucket| {
+            let mut row = Row::new(step.label(bucket.start));
+            for (harvest, amount) in harvests.iter().zip(&bucket.amounts) {
+                if *amount != Amount::default() {
+                    row.add_color(harvest.color);
+                }
             }
+            row.amount = bucket.total();
             row
         })
-        .collect();
-    rank(rows, metric, top)
+        .collect()
 }
 
 fn rank(mut rows: Vec<Row>, metric: Metric, top: usize) -> Vec<Row> {
@@ -318,6 +317,7 @@ fn rank(mut rows: Vec<Row>, metric: Metric, top: usize) -> Vec<Row> {
         b.amount
             .value(metric)
             .total_cmp(&a.amount.value(metric))
+            .then_with(|| b.amount.tokens.total().cmp(&a.amount.tokens.total()))
             .then_with(|| a.label.cmp(&b.label))
     });
     if rows.len() > top {
@@ -453,11 +453,38 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn harnesses_without_events_have_no_row() {
-        let rows = by_harness(&sample(), Metric::Tokens, 1);
+    fn summary_totals_each_harness_and_names_its_top_model() {
+        let summary = summary(&sample(), Metric::Tokens);
+        assert_eq!(summary.len(), 3);
+        assert_eq!(summary[0].amount.tokens.total(), 140);
+        assert_eq!(summary[0].top_model.as_deref(), Some("opus"));
+        assert_eq!(summary[1].amount.cost_usd, 7.0);
+        assert_eq!(summary[1].top_model.as_deref(), Some("shared"));
+        assert_eq!(summary[2].amount, Amount::default());
+        assert_eq!(summary[2].top_model, None);
+        let by_cost = super::summary(&sample(), Metric::Cost);
+        assert_eq!(by_cost[1].top_model.as_deref(), Some("tiny"));
+    }
+
+    #[test]
+    fn bucket_rows_skip_empty_buckets_and_keep_harness_colors() {
+        let harvests = sample();
+        let buckets = buckets(
+            &harvests,
+            at("2026-09-30T12:00:00Z"),
+            at("2026-10-05T12:00:00Z"),
+            Step::Day,
+            &Utc,
+        );
+        let rows = by_bucket(&harvests, &buckets, Step::Day);
         let labels: Vec<_> = rows.iter().map(|row| row.label.as_str()).collect();
-        assert_eq!(labels, ["claude", "other"]);
-        assert_eq!(rows[1].amount.cost_usd, 7.0);
+        assert_eq!(
+            labels,
+            ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"]
+        );
+        assert_eq!(rows[0].colors, [RED, BLUE]);
+        assert_eq!(rows[0].amount.tokens.total(), 121);
+        assert_eq!(rows[3].colors, [BLUE]);
     }
 
     #[test]

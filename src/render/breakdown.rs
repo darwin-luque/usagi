@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::breakdown::{Amount, Breakdown, Bucket, Metric, Row, Step, View};
+use crate::breakdown::{Amount, Breakdown, Bucket, Grouping, Metric, Row, Step};
 use crate::history::{Harvest, History, Tokens};
 use crate::theme::{BarStyle, Rgb};
 
@@ -121,28 +121,29 @@ pub fn render(breakdown: &Breakdown, color: bool, width: usize) -> String {
     }
     lines.push(headline);
     lines.push(String::new());
+    lines.push(format!("  {}", dim("By harness")));
+    lines.extend(summary(breakdown, color));
+    lines.push(String::new());
     lines.extend(token_types(total.tokens, color, width));
     lines.push(String::new());
-    match &breakdown.view {
-        View::Ranked(rows) => {
-            lines.push(format!(
-                "  {}",
-                dim(&format!("By {}", grouping_name(breakdown)))
-            ));
-            lines.extend(ranked(rows, metric, &breakdown.total, color));
-        }
-        View::Timeline { step, buckets } => {
-            lines.push(format!("  {}", dim(&format!("By {}", step_name(*step)))));
-            lines.extend(chart(
-                &breakdown.harvests,
-                buckets,
-                *step,
-                metric,
-                color,
-                width,
-            ));
-        }
-    }
+    lines.push(format!(
+        "  {}",
+        dim(&format!("Each {}", step_name(breakdown.step)))
+    ));
+    lines.extend(chart(
+        &breakdown.harvests,
+        &breakdown.buckets,
+        breakdown.step,
+        metric,
+        color,
+        width,
+    ));
+    lines.push(String::new());
+    lines.push(format!(
+        "  {}",
+        dim(&format!("By {}", grouping_name(breakdown)))
+    ));
+    lines.extend(ranked(&breakdown.rows, metric, &breakdown.total, color));
     let notes = notes(breakdown);
     if !notes.is_empty() {
         lines.push(String::new());
@@ -153,10 +154,95 @@ pub fn render(breakdown: &Breakdown, color: bool, width: usize) -> String {
 
 fn grouping_name(breakdown: &Breakdown) -> &'static str {
     match breakdown.grouping {
-        crate::breakdown::Grouping::Model => "model",
-        crate::breakdown::Grouping::Harness => "harness",
-        crate::breakdown::Grouping::Day => "day",
+        Grouping::Model => "model",
+        Grouping::Day => step_name(breakdown.step),
     }
+}
+
+fn summary(breakdown: &Breakdown, color: bool) -> Vec<String> {
+    let dim = |text: &str| paint(text, None, "\x1b[2m", color);
+    let metric = breakdown.metric;
+    let whole = breakdown.total.value(metric);
+    let mut order: Vec<_> = breakdown.harvests.iter().zip(&breakdown.summary).collect();
+    order.sort_by(|(a, a_summary), (b, b_summary)| {
+        let rank = |harvest: &Harvest| match harvest.history {
+            History::Events(_) => 0,
+            History::Failed(_) => 1,
+            History::Unsupported => 2,
+        };
+        rank(a).cmp(&rank(b)).then_with(|| {
+            b_summary
+                .amount
+                .value(metric)
+                .total_cmp(&a_summary.amount.value(metric))
+        })
+    });
+    let id_width = order
+        .iter()
+        .map(|(harvest, _)| harvest.id.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(LABEL_LIMIT);
+    let cells: Vec<Option<[String; 3]>> = order
+        .iter()
+        .map(|(harvest, summary)| {
+            let History::Events(_) = harvest.history else {
+                return None;
+            };
+            let amount = &summary.amount;
+            let tokens = format!("{} tokens", token_count(amount.tokens.total()));
+            let cost = breakdown.shows_cost().then(|| dollars(amount.cost_usd));
+            let (main, second) = match metric {
+                Metric::Tokens => (token_count(amount.tokens.total()), cost.unwrap_or_default()),
+                Metric::Cost => (dollars(amount.cost_usd), tokens),
+            };
+            Some([main, percent(amount.value(metric), whole), second])
+        })
+        .collect();
+    let width = |column: usize| {
+        cells
+            .iter()
+            .flatten()
+            .map(|cell| cell[column].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let widths = [width(0), width(1).max(5), width(2)];
+    order
+        .iter()
+        .zip(cells)
+        .map(|((harvest, summary), cell)| {
+            let id = format!(
+                "  {} {:<id_width$}",
+                paint("●", Some(harvest.color), "", color),
+                shorten(&harvest.id, id_width)
+            );
+            let Some([main, share, second]) = cell else {
+                let state = match harvest.history {
+                    History::Failed(_) => "failed, see the note below",
+                    History::Unsupported | History::Events(_) => "no token history",
+                };
+                return format!("{id}  {}", dim(state));
+            };
+            let top = summary
+                .top_model
+                .as_deref()
+                .map(|model| format!("top {model}"))
+                .unwrap_or_default();
+            let [main_width, share_width, second_width] = widths;
+            [
+                id,
+                format!("{main:>main_width$}"),
+                dim(&format!("{share:>share_width$}")),
+                dim(&format!("{second:>second_width$}")),
+                dim(&top),
+            ]
+            .into_iter()
+            .filter(|cell| !cell.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("  ")
+        })
+        .collect()
 }
 
 fn step_name(step: Step) -> &'static str {
@@ -215,7 +301,10 @@ fn ranked(rows: &[Row], metric: Metric, total: &Amount, color: bool) -> Vec<Stri
     if rows.is_empty() {
         return vec![paint("  No usage in this time.", None, "\x1b[2m", color)];
     }
-    let top = rows[0].amount.value(metric);
+    let top = rows
+        .iter()
+        .map(|row| row.amount.value(metric))
+        .fold(0.0, f64::max);
     let whole = total.value(metric);
     let label_width = rows
         .iter()
@@ -434,15 +523,6 @@ fn axis_labels(labels: &[String], cell: usize, span: usize) -> String {
 
 fn notes(breakdown: &Breakdown) -> Vec<String> {
     let mut notes = Vec::new();
-    let unsupported: Vec<_> = breakdown
-        .harvests
-        .iter()
-        .filter(|harvest| matches!(harvest.history, History::Unsupported))
-        .map(|harvest| harvest.id.as_str())
-        .collect();
-    if !unsupported.is_empty() {
-        notes.push(format!("No token history for {}.", list(&unsupported)));
-    }
     for harvest in &breakdown.harvests {
         if let History::Failed(error) = &harvest.history {
             notes.push(format!("{} failed. {error}", harvest.id));
@@ -517,6 +597,9 @@ struct HarnessJson<'a> {
     kind: &'a str,
     status: &'static str,
     events: usize,
+    tokens: TokensJson,
+    cost_usd: Option<f64>,
+    top_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -528,9 +611,8 @@ struct BreakdownJson<'a> {
     until: String,
     #[serde(rename = "type")]
     metric: Metric,
-    by: crate::breakdown::Grouping,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    step: Option<Step>,
+    by: Grouping,
+    step: Step,
     total: TotalJson,
     rows: Vec<RowJson>,
     harnesses: Vec<HarnessJson<'a>>,
@@ -544,21 +626,17 @@ pub fn json(breakdown: &Breakdown) -> String {
         until: breakdown.until.to_rfc3339(),
         metric: breakdown.metric,
         by: breakdown.grouping,
-        step: match &breakdown.view {
-            View::Timeline { step, .. } => Some(*step),
-            View::Ranked(_) => None,
-        },
+        step: breakdown.step,
         total: TotalJson {
             tokens: breakdown.total.tokens.into(),
             cost_usd: cost(&breakdown.total),
             unpriced_tokens: breakdown.total.unpriced_tokens,
         },
         rows: breakdown
-            .view
-            .rows()
-            .into_iter()
+            .rows
+            .iter()
             .map(|row| RowJson {
-                label: row.label,
+                label: row.label.clone(),
                 tokens: row.amount.tokens.into(),
                 cost_usd: cost(&row.amount),
             })
@@ -566,7 +644,8 @@ pub fn json(breakdown: &Breakdown) -> String {
         harnesses: breakdown
             .harvests
             .iter()
-            .map(|harvest| {
+            .zip(&breakdown.summary)
+            .map(|(harvest, summary)| {
                 let (status, error) = match &harvest.history {
                     History::Events(_) => ("ok", None),
                     History::Unsupported => ("unsupported", None),
@@ -577,6 +656,9 @@ pub fn json(breakdown: &Breakdown) -> String {
                     kind: harvest.kind,
                     status,
                     events: harvest.events().len(),
+                    tokens: summary.amount.tokens.into(),
+                    cost_usd: cost(&summary.amount),
+                    top_model: summary.top_model.clone(),
                     error,
                 }
             })
@@ -642,42 +724,60 @@ mod tests {
         assert_eq!(list(&["a", "b", "c"]), "a, b, and c");
     }
 
+    fn section<'a>(text: &'a str, title: &str) -> Vec<&'a str> {
+        text.lines()
+            .skip_while(|line| line.trim() != title)
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .collect()
+    }
+
     #[test]
-    fn plain_shows_totals_rows_and_notes() {
+    fn plain_shows_totals_summary_rows_and_notes() {
         let text = render(&build(Grouping::Model, Metric::Tokens, None), false, 80);
         let lines: Vec<_> = text.lines().collect();
         assert!(lines[0].starts_with("Breakdown  last 3 days  tokens"));
         assert_eq!(lines[3], "  2.5M tokens");
-        assert!(lines[6].contains("█ input 2.5M 100%   ▓ output 2 <0.1%"));
-        assert_eq!(lines[8], "  By model");
         assert_eq!(
-            lines[9],
-            format!("  opus   ●  {}  2.0M    80%", "█".repeat(24))
+            section(&text, "By harness"),
+            [
+                "  ● claude   2.5M   100%  top opus",
+                "  ● codex    failed, see the note below",
+                "  ● copilot  no token history",
+            ]
         );
+        assert!(text.contains("█ input 2.5M 100%   ▓ output 2 <0.1%"));
         assert_eq!(
-            lines[10],
-            format!("  haiku  ●  {}{}  500K    20%", "██████", " ".repeat(18))
+            section(&text, "By model"),
+            [
+                format!("  opus   ●  {}  2.0M    80%", "█".repeat(24)),
+                format!("  haiku  ●  {}{}  500K    20%", "██████", " ".repeat(18)),
+            ]
         );
-        assert!(text.contains("  · No token history for copilot."));
         assert!(text.contains("  · codex failed. Response format is not known. Bad file."));
         assert!(text.contains("  · Use --type cost to see the cost."));
+        assert!(!text.contains("No token history for"));
         assert!(!text.contains('\x1b'));
     }
 
     #[test]
-    fn day_chart_has_one_column_per_day_and_axis_labels() {
+    fn every_view_has_a_chart_and_day_view_lists_buckets() {
+        for grouping in [Grouping::Model, Grouping::Day] {
+            let text = render(&build(grouping, Metric::Tokens, None), false, 80);
+            let chart = section(&text, "Each day");
+            assert_eq!(chart.len(), 11);
+            assert!(chart[0].trim_start().starts_with("2.0M │"));
+            assert!(chart[7].trim_start().starts_with("0 │"));
+            assert!(chart[0].contains('█'));
+            assert!(chart[8].contains("└────────"));
+            assert!(chart[10].contains("● claude"));
+        }
         let text = render(&build(Grouping::Day, Metric::Tokens, None), false, 80);
-        let chart: Vec<_> = text
-            .lines()
-            .skip_while(|line| !line.contains("By day"))
-            .take_while(|line| !line.is_empty())
-            .collect();
-        assert_eq!(chart.len(), 12);
-        assert!(chart[1].trim_start().starts_with("2.0M │"));
-        assert!(chart[8].trim_start().starts_with("0 │"));
-        assert!(chart[1].contains('█'));
-        assert!(chart[9].contains("└────────"));
-        assert!(chart[11].contains("● claude"));
+        let rows = section(&text, "By day");
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].starts_with("  2026-10-02  ●"));
+        assert!(rows[0].ends_with("2.0M    80%"));
+        assert!(rows[1].starts_with("  2026-10-03  ●"));
     }
 
     #[test]
@@ -690,8 +790,13 @@ mod tests {
         let lines: Vec<_> = text.lines().collect();
         assert!(lines[0].ends_with("cost"));
         assert_eq!(lines[3], "  $2.00   2.5M tokens");
-        assert!(lines[9].starts_with("  opus   ●"));
-        assert!(lines[9].ends_with("$2.00   100%"));
+        assert_eq!(
+            section(&text, "By harness")[0],
+            "  ● claude   $2.00   100%  2.5M tokens  top opus"
+        );
+        let models = section(&text, "By model");
+        assert!(models[0].starts_with("  opus   ●"));
+        assert!(models[0].ends_with("$2.00   100%"));
         assert!(text.contains("  · Cost for Claude Code is an estimate from public API prices."));
         assert!(text.contains("  · 500K tokens have no known price and add no cost."));
         let tokens = render(
@@ -707,14 +812,18 @@ mod tests {
     #[test]
     fn json_has_a_stable_shape() {
         let value: serde_json::Value =
-            serde_json::from_str(&json(&build(Grouping::Harness, Metric::Cost, None))).unwrap();
+            serde_json::from_str(&json(&build(Grouping::Day, Metric::Cost, None))).unwrap();
         assert_eq!(value["type"], "cost");
-        assert_eq!(value["by"], "harness");
+        assert_eq!(value["by"], "day");
+        assert_eq!(value["step"], "day");
         assert_eq!(value["total"]["tokens"]["input"], 2_499_998);
         assert_eq!(value["total"]["tokens"]["total"], 2_500_000);
         assert_eq!(value["total"]["cost_usd"], 0.0);
         assert_eq!(value["total"]["unpriced_tokens"], 2_500_000);
-        assert_eq!(value["rows"][0]["label"], "claude");
+        assert_eq!(value["rows"][0]["label"], "2026-10-02");
+        assert_eq!(value["harnesses"][0]["tokens"]["total"], 2_500_000);
+        assert_eq!(value["harnesses"][0]["top_model"], "opus");
+        assert_eq!(value["harnesses"][1]["top_model"], serde_json::Value::Null);
         assert_eq!(value["harnesses"][1]["status"], "unsupported");
         assert_eq!(value["harnesses"][2]["status"], "error");
         assert_eq!(
