@@ -3,20 +3,10 @@ use chrono::{DateTime, Utc};
 use crate::theme::{BarStyle, Rgb, Theme};
 use crate::usage::{Outcome, Report};
 
-use super::{Role, amount, bar_cells, detail};
+use super::{Role, amount, bar_cells, detail, paint};
 
 pub fn render(reports: &[Report], theme: &Theme, color: bool) -> String {
     render_at(reports, theme, color, Utc::now())
-}
-
-fn paint(text: &str, rgb: Option<Rgb>, modifier: &str, color: bool) -> String {
-    if !color {
-        return text.into();
-    }
-    let foreground = rgb
-        .map(|Rgb(r, g, b)| format!("\x1b[38;2;{r};{g};{b}m"))
-        .unwrap_or_default();
-    format!("{foreground}{modifier}{text}\x1b[0m")
 }
 
 fn render_at(reports: &[Report], theme: &Theme, color: bool, now: DateTime<Utc>) -> String {

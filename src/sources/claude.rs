@@ -1,18 +1,80 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{Detection, remote};
+use super::{Detection, jsonl, remote};
+use crate::history::{Event, Tokens};
 use crate::usage::{Meter, ProbeError, Reset, Span, Usage, Window};
 
 const HINT: &str = "Run claude once to refresh the login.";
 
-fn credentials_path() -> PathBuf {
+fn config_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::config::home().join(".claude"))
-        .join(".credentials.json")
+}
+
+fn credentials_path() -> PathBuf {
+    config_dir().join(".credentials.json")
+}
+
+pub fn events(since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    read_events(&config_dir().join("projects"), since)
+}
+
+fn read_events(root: &Path, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    let mut seen = HashSet::new();
+    let mut events = Vec::new();
+    jsonl::read(root, since, |file| {
+        jsonl::lines(file, |line| {
+            if let Some((key, event)) = parse_line(line)
+                && event.at >= since
+                && key.is_none_or(|key| seen.insert(key))
+            {
+                events.push(event);
+            }
+        })
+    })?;
+    Ok(events)
+}
+
+fn parse_line(line: &str) -> Option<(Option<String>, Event)> {
+    if !line.contains("\"usage\"") {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value["type"] != "assistant" {
+        return None;
+    }
+    let message = &value["message"];
+    let usage = message.get("usage").filter(|usage| usage.is_object())?;
+    let model = message["model"].as_str()?;
+    if model == "<synthetic>" {
+        return None;
+    }
+    let key = match (message["id"].as_str(), value["requestId"].as_str()) {
+        (None, None) => None,
+        (id, request) => Some(format!("{}:{}", id.unwrap_or(""), request.unwrap_or(""))),
+    };
+    let count = |name: &str| usage[name].as_u64().unwrap_or(0);
+    Some((
+        key,
+        Event {
+            at: DateTime::parse_from_rfc3339(value["timestamp"].as_str()?)
+                .ok()?
+                .to_utc(),
+            model: model.to_owned(),
+            tokens: Tokens {
+                input: count("input_tokens"),
+                output: count("output_tokens"),
+                cache_read: count("cache_read_input_tokens"),
+                cache_write: count("cache_creation_input_tokens"),
+            },
+            cost_usd: None,
+        },
+    ))
 }
 
 fn read_credentials(path: Option<&Path>) -> Result<Value, ProbeError> {
@@ -206,6 +268,58 @@ mod tests {
             .1,
             Some("Max".into())
         );
+    }
+
+    #[test]
+    fn each_message_counts_once_across_content_blocks_and_subagents() {
+        let root = std::env::temp_dir().join(format!(
+            "usagi-claude-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir_all(root.join("project/session/subagents")).unwrap();
+        let line = |id: &str, request: &str, model: &str, time: &str| {
+            json!({"type":"assistant","requestId":request,"timestamp":time,"message":{
+                "id":id,"model":model,"usage":{"input_tokens":2,"output_tokens":10,
+                "cache_read_input_tokens":300,"cache_creation_input_tokens":40}}})
+            .to_string()
+        };
+        std::fs::write(
+            root.join("project/main.jsonl"),
+            [
+                line("m1", "r1", "claude-opus-5-5", "2026-10-29T10:00:00Z"),
+                line("m1", "r1", "claude-opus-5-5", "2026-10-29T10:00:01Z"),
+                line("m2", "r2", "<synthetic>", "2026-10-29T10:00:00Z"),
+                line("m3", "r3", "claude-opus-5-5", "2026-09-01T10:00:00Z"),
+                r#"{"type":"user","message":{"usage":{}}}"#.into(),
+                "broken \"usage\"".into(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("project/session/subagents/agent.jsonl"),
+            line("m4", "r4", "claude-haiku-5-5", "2026-10-29T11:00:00Z"),
+        )
+        .unwrap();
+        let since = DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let events = read_events(&root, since).unwrap();
+        let models: Vec<_> = events.iter().map(|event| event.model.as_str()).collect();
+        assert_eq!(models, ["claude-opus-5-5", "claude-haiku-5-5"]);
+        assert_eq!(
+            events[0].tokens,
+            Tokens {
+                input: 2,
+                output: 10,
+                cache_read: 300,
+                cache_write: 40
+            }
+        );
+        assert_eq!(events[0].cost_usd, None);
+        assert_eq!(read_events(&root.join("missing"), since), Ok(vec![]));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

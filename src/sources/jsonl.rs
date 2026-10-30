@@ -3,6 +3,27 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
+use crate::usage::ProbeError;
+
+pub fn read(
+    root: &Path,
+    since: DateTime<Utc>,
+    mut visit: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), ProbeError> {
+    let error = |error: std::io::Error| {
+        ProbeError::Parse(format!("Cannot read {}. {error}", root.display()))
+    };
+    let found = match files(root, since) {
+        Ok(found) => found,
+        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(other) => return Err(error(other)),
+    };
+    for file in found {
+        visit(&file).map_err(error)?;
+    }
+    Ok(())
+}
+
 pub fn files(root: &Path, since: DateTime<Utc>) -> std::io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     collect(root, since, &mut found)?;

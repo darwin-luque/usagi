@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{Detection, remote};
+use super::{Detection, jsonl, remote};
+use crate::history::{Event, Tokens};
 use crate::usage::{Meter, ProbeError, Reset, Span, Usage, Window};
 
 const HINT: &str = "Run codex once to refresh the login.";
@@ -13,6 +14,101 @@ fn home_path(home: Option<&Path>) -> PathBuf {
     home.map(Path::to_path_buf)
         .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
         .unwrap_or_else(|| crate::config::home().join(".codex"))
+}
+
+pub fn events(home: Option<&Path>, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    let mut events = Vec::new();
+    jsonl::read(&home_path(home).join("sessions"), since, |file| {
+        let mut rollout = Rollout::default();
+        jsonl::lines(file, |line| {
+            if let Some(event) = rollout.read(line)
+                && event.at >= since
+            {
+                events.push(event);
+            }
+        })
+    })?;
+    Ok(events)
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Totals {
+    input: u64,
+    cached: u64,
+    cache_write: u64,
+    output: u64,
+}
+
+impl Totals {
+    fn parse(value: &Value) -> Totals {
+        let count = |name: &str| value[name].as_u64().unwrap_or(0);
+        Totals {
+            input: count("input_tokens"),
+            cached: count("cached_input_tokens"),
+            cache_write: count("cache_write_input_tokens"),
+            output: count("output_tokens"),
+        }
+    }
+
+    fn since(self, previous: Totals) -> Totals {
+        Totals {
+            input: self.input.saturating_sub(previous.input),
+            cached: self.cached.saturating_sub(previous.cached),
+            cache_write: self.cache_write.saturating_sub(previous.cache_write),
+            output: self.output.saturating_sub(previous.output),
+        }
+    }
+
+    fn tokens(self) -> Tokens {
+        Tokens {
+            input: self
+                .input
+                .saturating_sub(self.cached)
+                .saturating_sub(self.cache_write),
+            output: self.output,
+            cache_read: self.cached,
+            cache_write: self.cache_write,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Rollout {
+    model: Option<String>,
+    totals: Totals,
+}
+
+impl Rollout {
+    fn read(&mut self, line: &str) -> Option<Event> {
+        if !line.contains("\"turn_context\"") && !line.contains("\"token_count\"") {
+            return None;
+        }
+        let value: Value = serde_json::from_str(line).ok()?;
+        let payload = &value["payload"];
+        if value["type"] == "turn_context" {
+            if let Some(model) = payload["model"].as_str() {
+                self.model = Some(model.to_owned());
+            }
+            return None;
+        }
+        if value["type"] != "event_msg" || payload["type"] != "token_count" {
+            return None;
+        }
+        let totals = Totals::parse(payload["info"].get("total_token_usage")?);
+        let delta = totals.since(self.totals);
+        self.totals = totals;
+        if delta == Totals::default() {
+            return None;
+        }
+        Some(Event {
+            at: DateTime::parse_from_rfc3339(value["timestamp"].as_str()?)
+                .ok()?
+                .to_utc(),
+            model: self.model.clone().unwrap_or_else(|| "unknown".into()),
+            tokens: delta.tokens(),
+            cost_usd: None,
+        })
+    }
 }
 
 fn read_auth(home: &Path) -> Result<Value, ProbeError> {
@@ -192,6 +288,72 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn token_events_are_deltas_of_the_running_total_with_the_current_model() {
+        let context =
+            |model: &str| json!({"type":"turn_context","payload":{"model":model}}).to_string();
+        let count = |time: &str, input: u64, cached: u64, output: u64| {
+            json!({"timestamp":time,"type":"event_msg","payload":{"type":"token_count","info":{
+                "total_token_usage":{"input_tokens":input,"cached_input_tokens":cached,
+                "cache_write_input_tokens":0,"output_tokens":output,"reasoning_output_tokens":1,
+                "total_tokens":input + output}}}})
+            .to_string()
+        };
+        let lines = [
+            count("2026-10-29T10:00:00Z", 100, 0, 5),
+            context("gpt-6.1-sol"),
+            count("2026-10-29T10:01:00Z", 300, 150, 15),
+            count("2026-10-29T10:01:01Z", 300, 150, 15),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":null}}).to_string(),
+            context("gpt-6-astra"),
+            count("2026-10-29T10:02:00Z", 1300, 950, 115),
+            "broken".into(),
+        ];
+        let mut rollout = Rollout::default();
+        let events: Vec<_> = lines.iter().filter_map(|line| rollout.read(line)).collect();
+        let summary: Vec<_> = events
+            .iter()
+            .map(|event| (event.model.as_str(), event.tokens))
+            .collect();
+        let tokens = |input, output, cache_read| Tokens {
+            input,
+            output,
+            cache_read,
+            cache_write: 0,
+        };
+        assert_eq!(
+            summary,
+            [
+                ("unknown", tokens(100, 5, 0)),
+                ("gpt-6.1-sol", tokens(50, 10, 150)),
+                ("gpt-6-astra", tokens(200, 100, 800)),
+            ]
+        );
+        assert_eq!(
+            events[2].at,
+            DateTime::parse_from_rfc3339("2026-10-29T10:02:00Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn cache_writes_are_not_counted_as_input() {
+        let totals = Totals {
+            input: 100,
+            cached: 30,
+            cache_write: 20,
+            output: 7,
+        };
+        assert_eq!(
+            totals.tokens(),
+            Tokens {
+                input: 50,
+                output: 7,
+                cache_read: 30,
+                cache_write: 20
+            }
+        );
     }
 
     #[test]

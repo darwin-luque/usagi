@@ -1,3 +1,4 @@
+pub mod breakdown;
 pub mod json;
 pub mod live;
 pub mod plain;
@@ -5,8 +6,18 @@ pub mod raw;
 
 use chrono::{DateTime, Utc};
 
-use crate::theme::BarStyle;
+use crate::theme::{BarStyle, Rgb};
 use crate::usage::{Meter, Reset, Window};
+
+pub fn paint(text: &str, rgb: Option<Rgb>, modifier: &str, color: bool) -> String {
+    if !color {
+        return text.into();
+    }
+    let foreground = rgb
+        .map(|Rgb(r, g, b)| format!("\x1b[38;2;{r};{g};{b}m"))
+        .unwrap_or_default();
+    format!("{foreground}{modifier}{text}\x1b[0m")
+}
 
 pub fn countdown(reset: Reset, now: DateTime<Utc>) -> String {
     match reset {

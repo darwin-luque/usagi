@@ -10,7 +10,10 @@ mod opencode_go;
 mod pi;
 mod remote;
 
+use chrono::{DateTime, Utc};
+
 use crate::config::Source;
+use crate::history::History;
 use crate::usage::{ProbeError, Usage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +33,19 @@ pub fn fetch(source: &Source) -> Result<Usage, ProbeError> {
         Source::Pi { sessions, limits } => pi::fetch(sessions.as_deref(), limits),
         Source::Hermes { db, limits } => hermes::fetch(db.as_deref(), limits),
         Source::Command { run } => command::fetch(run),
+    }
+}
+
+pub fn events(source: &Source, since: DateTime<Utc>) -> History {
+    match source {
+        Source::Claude { .. } => claude::events(since).into(),
+        Source::Codex { home } => codex::events(home.as_deref(), since).into(),
+        Source::OpencodeGo { db, .. } => opencode_go::events(db.as_deref(), since).into(),
+        Source::Pi { sessions, .. } => pi::events(sessions.as_deref(), since).into(),
+        Source::Hermes { db, .. } => hermes::events(db.as_deref(), since).into(),
+        Source::Cursor { .. } | Source::Copilot { .. } | Source::Command { .. } => {
+            History::Unsupported
+        }
     }
 }
 

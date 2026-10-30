@@ -1,4 +1,6 @@
+mod breakdown;
 mod config;
+mod history;
 mod kinds;
 mod probe;
 mod render;
@@ -13,7 +15,9 @@ use std::process::{Command, ExitCode};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
+use breakdown::{Grouping, Metric, Request};
 use config::{Config, Harness, Source};
+use history::Past;
 use sources::Detection;
 use theme::Rgb;
 use usage::Outcome;
@@ -38,6 +42,8 @@ enum Action {
     Usage(UsageArgs),
     #[command(about = "Show usage and keep it up to date.")]
     Live(LiveArgs),
+    #[command(about = "Show how you used your harnesses and models.")]
+    Breakdown(BreakdownArgs),
     #[command(about = "Find harnesses and save a config file.")]
     Init {
         #[arg(long, help = "Replace the config file.")]
@@ -94,6 +100,28 @@ struct LiveArgs {
     every: Option<u64>,
 }
 
+#[derive(Args)]
+struct BreakdownArgs {
+    #[arg(long = "type", value_enum, default_value_t = Metric::Tokens, help = "Rank and total by tokens or cost.")]
+    metric: Metric,
+    #[arg(
+        long,
+        default_value = "30d",
+        help = "Read this far back, like 24h, 30d, or 1y."
+    )]
+    past: Past,
+    #[arg(long = "by", value_enum, default_value_t = Grouping::Model, help = "Group by model, day, or harness.")]
+    grouping: Grouping,
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..), help = "Show this many rows. The rest go into one other row.")]
+    top: u16,
+    #[arg(long, help = "Show only this harness id.")]
+    only: Vec<String>,
+    #[arg(long, help = "Print the breakdown as JSON.")]
+    json: bool,
+    #[arg(long, help = "Turn off color output.")]
+    no_color: bool,
+}
+
 #[derive(Subcommand)]
 enum ConfigAction {
     #[command(about = "Show the config file path.")]
@@ -126,6 +154,7 @@ fn execute(action: Action) -> Result<u8> {
     let path = config::path();
     match action {
         Action::Usage(args) => return show_usage(&path, args),
+        Action::Breakdown(args) => return show_breakdown(&path, args),
         Action::Live(args) => {
             return show_usage(
                 &path,
@@ -330,20 +359,60 @@ fn list(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn configured(path: &Path) -> Result<Option<Config>> {
+    if let Some(config) = Config::load(path)? {
+        return Ok(Some(config));
+    }
+    eprintln!("No config file. usagi shows the harnesses it found. Run usagi init to save them.");
+    let config = detect_config(false);
+    if config.harnesses.is_empty() {
+        eprintln!("usagi found no harness. Run usagi list to see the supported harnesses.");
+        return Ok(None);
+    }
+    Ok(Some(config))
+}
+
+fn terminal_width() -> usize {
+    if !std::io::stdout().is_terminal() {
+        return 80;
+    }
+    ratatui::crossterm::terminal::size()
+        .map(|(columns, _)| usize::from(columns))
+        .unwrap_or(80)
+}
+
+fn show_breakdown(path: &Path, args: BreakdownArgs) -> Result<u8> {
+    let Some(config) = configured(path)? else {
+        return Ok(1);
+    };
+    let harnesses = config.enabled(&args.only)?;
+    if args.past.duration() > chrono::Duration::days(90) {
+        eprintln!("Reading {} of history can take a while.", args.past.label());
+    }
+    let request = Request {
+        past: args.past,
+        until: chrono::Utc::now(),
+        metric: args.metric,
+        grouping: args.grouping,
+        top: args.top.into(),
+    };
+    let harvests = history::read_all(&harnesses, request.since());
+    let read = harvests
+        .iter()
+        .any(|harvest| matches!(harvest.history, history::History::Events(_)));
+    let breakdown = request.build(harvests);
+    let output = if args.json {
+        render::breakdown::json(&breakdown)
+    } else {
+        render::breakdown::render(&breakdown, use_color(args.no_color), terminal_width())
+    };
+    println!("{output}");
+    Ok(if read { 0 } else { 1 })
+}
+
 fn show_usage(path: &Path, args: UsageArgs) -> Result<u8> {
-    let mut config = match Config::load(path)? {
-        Some(config) => config,
-        None => {
-            eprintln!(
-                "No config file. usagi shows the harnesses it found. Run usagi init to save them."
-            );
-            let config = detect_config(false);
-            if config.harnesses.is_empty() {
-                eprintln!("usagi found no harness. Run usagi list to see the supported harnesses.");
-                return Ok(1);
-            }
-            config
-        }
+    let Some(mut config) = configured(path)? else {
+        return Ok(1);
     };
     if let Some(seconds) = args.every {
         config.refresh_seconds = seconds;

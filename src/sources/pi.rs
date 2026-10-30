@@ -8,6 +8,7 @@ use super::{
     ledger::{self, HORIZON, Spend},
 };
 use crate::config::Limits;
+use crate::history::{Event, Tokens};
 use crate::usage::{ProbeError, Usage};
 
 fn sessions_path(path: Option<&Path>) -> PathBuf {
@@ -36,22 +37,57 @@ fn read_sessions(path: &Path, since: DateTime<Utc>) -> Result<Vec<String>, Probe
     read().map_err(|error| ProbeError::Parse(format!("Cannot read Pi sessions. {error}")))
 }
 
+pub fn events(path: Option<&Path>, since: DateTime<Utc>) -> Result<Vec<Event>, ProbeError> {
+    let mut events = Vec::new();
+    jsonl::read(&sessions_path(path), since, |file| {
+        jsonl::lines(file, |line| {
+            if let Some(event) = parse_event(line)
+                && event.at >= since
+            {
+                events.push(event);
+            }
+        })
+    })?;
+    Ok(events)
+}
+
+fn assistant_message(line: &str) -> Option<(DateTime<Utc>, Value)> {
+    let mut value: Value = serde_json::from_str(line).ok()?;
+    if value["type"] != "message" || value["message"]["role"] != "assistant" {
+        return None;
+    }
+    let at = if let Some(timestamp) = value["message"].get("timestamp") {
+        DateTime::from_timestamp_millis(timestamp.as_i64()?)?
+    } else {
+        DateTime::parse_from_rfc3339(value["timestamp"].as_str()?)
+            .ok()?
+            .to_utc()
+    };
+    Some((at, value["message"].take()))
+}
+
+fn parse_event(line: &str) -> Option<Event> {
+    let (at, message) = assistant_message(line)?;
+    let usage = &message["usage"];
+    let count = |name: &str| usage[name].as_u64().unwrap_or(0);
+    Some(Event {
+        at,
+        model: message["model"].as_str().unwrap_or("unknown").to_owned(),
+        tokens: Tokens {
+            input: count("input"),
+            output: count("output"),
+            cache_read: count("cacheRead"),
+            cache_write: count("cacheWrite"),
+        },
+        cost_usd: usage["cost"]["total"].as_f64(),
+    })
+}
+
 fn parse_lines(lines: &[String], limits: &Limits, now: DateTime<Utc>) -> Result<Usage, ProbeError> {
     let entries: Vec<_> = lines
         .iter()
         .filter_map(|line| {
-            let value: Value = serde_json::from_str(line).ok()?;
-            if value["type"] != "message" || value["message"]["role"] != "assistant" {
-                return None;
-            }
-            let message = &value["message"];
-            let at = if let Some(timestamp) = message.get("timestamp") {
-                DateTime::from_timestamp_millis(timestamp.as_i64()?)?
-            } else {
-                DateTime::parse_from_rfc3339(value["timestamp"].as_str()?)
-                    .ok()?
-                    .to_utc()
-            };
+            let (at, message) = assistant_message(line)?;
             Some(Spend {
                 at,
                 usd: message["usage"]["cost"]["total"].as_f64()?,
