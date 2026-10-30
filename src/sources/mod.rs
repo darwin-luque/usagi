@@ -7,6 +7,7 @@ mod hermes;
 mod ledger;
 mod opencode_go;
 mod pi;
+mod remote;
 
 use crate::config::Source;
 use crate::usage::{ProbeError, Usage};

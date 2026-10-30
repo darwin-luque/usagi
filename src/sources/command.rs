@@ -1,5 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,10 +26,7 @@ impl OutputFile {
             let mut options = OpenOptions::new();
             options.read(true).write(true).create_new(true);
             #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
+            options.mode(0o600);
             match options.open(&path) {
                 Ok(file) => {
                     return Ok(Self {
@@ -142,7 +141,7 @@ pub fn detect(run: &str) -> Detection {
     if run.trim().is_empty() {
         Detection::Absent
     } else {
-        Detection::Ready("command set".into())
+        Detection::Ready("Command set.".into())
     }
 }
 
@@ -169,7 +168,7 @@ mod tests {
             }
         );
         assert_eq!(usage.windows[0].reset, Reset::Rolling);
-        assert_eq!(detect(run), Detection::Ready("command set".into()));
+        assert_eq!(detect(run), Detection::Ready("Command set.".into()));
     }
 
     #[test]

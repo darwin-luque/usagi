@@ -24,9 +24,12 @@ use usage::Outcome;
     version,
     about = "Show the usage limits of your harnesses."
 )]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Action>,
+    #[command(flatten)]
+    usage: UsageArgs,
 }
 
 #[derive(Subcommand)]
@@ -110,7 +113,7 @@ fn parse_seconds(text: &str) -> std::result::Result<u64, String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match execute(cli.command.unwrap_or(Action::Usage(UsageArgs::default()))) {
+    match execute(cli.command.unwrap_or(Action::Usage(cli.usage))) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("usagi: {error:#}");
@@ -140,11 +143,9 @@ fn execute(action: Action) -> Result<u8> {
             }
             let config = detect_config(true);
             config.save(&path)?;
-            println!(
-                "Saved {} harnesses to {}",
-                config.harnesses.len(),
-                path.display()
-            );
+            let count = config.harnesses.len();
+            let noun = if count == 1 { "harness" } else { "harnesses" };
+            println!("Saved {count} {noun} to {}", path.display());
         }
         Action::List => list(&path)?,
         Action::Add {
@@ -365,7 +366,9 @@ fn show_usage(path: &Path, args: UsageArgs) -> Result<u8> {
     } else {
         render::plain::render(&reports, &config.theme, use_color(args.no_color))
     };
-    print!("{output}");
+    if !output.is_empty() {
+        println!("{}", output.trim_end_matches('\n'));
+    }
     Ok(
         if reports
             .iter()

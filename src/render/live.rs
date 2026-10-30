@@ -14,7 +14,7 @@ use crate::config::{Config, Harness};
 use crate::theme::{Rgb, Theme};
 use crate::usage::{Outcome, Report};
 
-use super::{Role, amount, bar_cells, countdown};
+use super::{Role, amount, bar_cells, detail};
 
 struct State {
     harnesses: Vec<Harness>,
@@ -119,15 +119,17 @@ fn window_line(
     report: &Report,
     theme: &Theme,
     width: u16,
+    columns: (usize, usize),
     now: DateTime<Utc>,
 ) -> Line<'static> {
+    let (value_width, reset_width) = columns;
     let label = format!("{:<12}", window.label());
-    let value = format!("{:>4}", amount(window.meter));
-    let reset = countdown(window.reset, now);
-    let reset = if reset.is_empty() {
+    let value = format!("{:>value_width$}", amount(window.meter));
+    let reset = detail(window, now);
+    let reset = if reset_width == 0 {
         reset
     } else {
-        format!("  {reset}")
+        format!("  {reset:<reset_width$}")
     };
     let fixed_width = label.chars().count() + value.chars().count() + reset.chars().count() + 3;
     let bar_width = usize::from(width).saturating_sub(fixed_width);
@@ -175,10 +177,22 @@ fn card_lines(
             Style::default().fg(color(theme.danger)),
         )],
         Some((Outcome::Usage(usage), report)) => {
+            let widest = |text: &dyn Fn(&crate::usage::Window) -> String| {
+                usage
+                    .windows
+                    .iter()
+                    .map(|window| text(window).chars().count())
+                    .max()
+                    .unwrap_or(0)
+            };
+            let columns = (
+                widest(&|window| amount(window.meter)).max(4),
+                widest(&|window| detail(window, now)),
+            );
             let mut lines: Vec<_> = usage
                 .windows
                 .iter()
-                .map(|window| window_line(window, report, theme, width, now))
+                .map(|window| window_line(window, report, theme, width, columns, now))
                 .collect();
             lines.extend(
                 usage
@@ -216,7 +230,7 @@ fn draw(frame: &mut Frame, state: &State, theme: &Theme, now: DateTime<Utc>) {
         header,
         Rect::new(area.x, area.y, area.width, area.height.min(1)),
     );
-    let columns = if area.width < 100 { 1 } else { 2 };
+    let columns = if area.width < 140 { 1 } else { 2 };
     let gap = if columns == 2 { 2 } else { 0 };
     let card_width = area.width.saturating_sub(gap) / columns;
     let bottom = area.bottom();

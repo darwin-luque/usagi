@@ -232,7 +232,6 @@ pub enum ProbeError {
     Network(String),
     Parse(String),
     Command(String),
-    Unsupported(String),
 }
 
 impl fmt::Display for ProbeError {
@@ -246,7 +245,6 @@ impl fmt::Display for ProbeError {
             ProbeError::Network(detail) => write!(f, "Network failed. {detail}"),
             ProbeError::Parse(detail) => write!(f, "Response format is not known. {detail}"),
             ProbeError::Command(detail) => write!(f, "Command failed. {detail}"),
-            ProbeError::Unsupported(detail) => write!(f, "Not supported. {detail}"),
         }
     }
 }

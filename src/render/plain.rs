@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use crate::theme::{BarStyle, Rgb, Theme};
 use crate::usage::{Outcome, Report};
 
-use super::{Role, amount, bar_cells, countdown};
+use super::{Role, amount, bar_cells, detail};
 
 pub fn render(reports: &[Report], theme: &Theme, color: bool) -> String {
     render_at(reports, theme, color, Utc::now())
@@ -77,7 +77,7 @@ fn render_at(reports: &[Report], theme: &Theme, color: bool, now: DateTime<Utc>)
                             color,
                         );
                         let mut line = format!("  {:<12} {bar}  {value}", window.label());
-                        let reset = countdown(window.reset, now);
+                        let reset = detail(window, now);
                         if !reset.is_empty() {
                             line.push_str(&paint(&format!("  {reset}"), None, "\x1b[2m", color));
                         }
@@ -172,13 +172,13 @@ mod tests {
             vec![
                 "● Claude Code".to_string(),
                 format!(
-                    "  {:<12} {}  {:>15}",
+                    "  {:<12} {}  {:>5}  spent",
                     "month",
                     " ".repeat(28),
-                    "$4.21 spent"
+                    "$4.21"
                 ),
                 format!(
-                    "  {:<12} {}  $4.21 of $12.00  rolling",
+                    "  {:<12} {}    35%  $4.21 of $12.00 · rolling",
                     "week opus",
                     format!("{}{}", "━".repeat(10), "─".repeat(18))
                 ),

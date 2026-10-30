@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod json;
 pub mod live;
 pub mod plain;
@@ -8,7 +6,7 @@ pub mod raw;
 use chrono::{DateTime, Utc};
 
 use crate::theme::BarStyle;
-use crate::usage::{Meter, Reset};
+use crate::usage::{Meter, Reset, Window};
 
 pub fn countdown(reset: Reset, now: DateTime<Utc>) -> String {
     match reset {
@@ -32,18 +30,29 @@ pub fn countdown(reset: Reset, now: DateTime<Utc>) -> String {
 }
 
 pub fn amount(meter: Meter) -> String {
-    match meter {
-        Meter::Percent { used } => format!("{used:.0}%"),
+    match (meter.percent(), meter) {
+        (Some(percent), _) => format!("{percent:.0}%"),
+        (None, Meter::Spend { used_usd, .. }) => format!("${used_usd:.2}"),
+        (None, Meter::Percent { .. }) => String::new(),
+    }
+}
+
+pub fn detail(window: &Window, now: DateTime<Utc>) -> String {
+    let reset = countdown(window.reset, now);
+    let spend = match window.meter {
         Meter::Spend {
             used_usd,
             limit_usd: Some(limit),
-        } => {
-            format!("${used_usd:.2} of ${limit:.2}")
-        }
+        } => format!("${used_usd:.2} of ${limit:.2}"),
         Meter::Spend {
-            used_usd,
-            limit_usd: None,
-        } => format!("${used_usd:.2} spent"),
+            limit_usd: None, ..
+        } => "spent".into(),
+        Meter::Percent { .. } => return reset,
+    };
+    if reset.is_empty() {
+        spend
+    } else {
+        format!("{spend} · {reset}")
     }
 }
 
@@ -165,22 +174,33 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn amount_shows_rounded_percent_and_dollar_limits() {
+    fn amount_shows_percent_and_detail_shows_dollars() {
+        let window = |meter, reset| Window {
+            span: crate::usage::Span::Week,
+            scope: None,
+            meter,
+            reset,
+        };
         assert_eq!(amount(Meter::Percent { used: 22.4 }), "22%");
         assert_eq!(amount(Meter::Percent { used: 22.6 }), "23%");
+        let limited = Meter::Spend {
+            used_usd: 4.21,
+            limit_usd: Some(12.0),
+        };
+        let open = Meter::Spend {
+            used_usd: 4.21,
+            limit_usd: None,
+        };
+        assert_eq!(amount(limited), "35%");
+        assert_eq!(amount(open), "$4.21");
         assert_eq!(
-            amount(Meter::Spend {
-                used_usd: 4.21,
-                limit_usd: Some(12.0)
-            }),
-            "$4.21 of $12.00"
+            detail(&window(limited, Reset::Rolling), now()),
+            "$4.21 of $12.00 · rolling"
         );
+        assert_eq!(detail(&window(open, Reset::Unknown), now()), "spent");
         assert_eq!(
-            amount(Meter::Spend {
-                used_usd: 4.21,
-                limit_usd: None
-            }),
-            "$4.21 spent"
+            detail(&window(Meter::Percent { used: 1.0 }, Reset::Rolling), now()),
+            "rolling"
         );
     }
 
