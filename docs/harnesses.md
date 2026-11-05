@@ -20,7 +20,7 @@ The harnesses do not share one usage format. usagi converts each format into one
 | Codex | `codex` | Built in, verified | 5h, week | ChatGPT usage endpoint |
 | Cursor and cursor-agent | `cursor` | Built in, verified | month (billing cycle): total, auto, api | Cursor dashboard endpoint |
 | GitHub Copilot | `copilot` | Built in, verified | month per quota | Copilot user endpoint |
-| OpenCode Go | `opencode-go` | Built in, verified | 5h, week, month in dollars | Local OpenCode database |
+| OpenCode Go | `opencode-go` | Built in | 5h, week, month in percent | OpenCode Go usage API |
 | Pi | `pi` | Built in, not verified | 5h, day, week, month in dollars | Local Pi session files |
 | Hermes Agent | `hermes` | Built in, not verified | 5h, day, week, month in dollars | Local Hermes database |
 | Gemini CLI | `command` | Use `command` | day per model | Google Code Assist quota endpoint |
@@ -68,10 +68,10 @@ The harnesses do not share one usage format. usagi converts each format into one
 ## OpenCode Go
 
 - **Kind:** `opencode-go`
-- **Why local:** OpenCode Go shows usage only in the web console at opencode.ai. It has no usage endpoint for the CLI.
-- **Data:** OpenCode records the dollar cost of each message in `~/.local/share/opencode/opencode.db` (table `session_message`, or `message` in old versions). usagi adds the cost of each `opencode-go` message inside rolling windows.
-- **Limits:** the default limits are $12 for 5 hours, $30 for a week, and $60 for a month. These are the values in the OpenCode Go docs. The newest docs show no monthly limit. If your plan changes, set new values under `limits`.
-- **Accuracy:** the result is an estimate. It does not include usage from other computers.
+- **Login:** reads the `opencode-go` API key from `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share/opencode/auth.json`). Save the key with `opencode auth login`. If it expires, create a new key in OpenCode Console; signing in again does not renew an expired key.
+- **Data:** asks `https://opencode.ai/zen/go/v1/usage` for the subscription's 5-hour, weekly, and monthly percentages and reset timestamps. These are account usage values, including usage from other computers.
+- **Limits:** the service reports the allowance consumed directly. Legacy `limits` settings remain accepted for compatibility but do not override subscription usage. The `db` setting applies only to token history.
+- **Errors:** missing or expired credentials, network failures, and invalid responses are reported as errors. Local dollar estimates are not substituted for subscription usage.
 - **Token history:** `usagi breakdown` reads every assistant message in the same database, from all providers. Each message has the model, `tokens`, and `cost`. Reasoning tokens count as output.
 
 ## Pi

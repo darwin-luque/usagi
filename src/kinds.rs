@@ -44,7 +44,7 @@ pub const KINDS: &[KindInfo] = &[
         name: "opencode-go",
         title: "OpenCode Go",
         color: Rgb(0xF2, 0xC9, 0x4C),
-        method: "Adds the cost of each OpenCode Go message in the local OpenCode database.",
+        method: "Reads the OpenCode Go API key and asks the subscription usage endpoint.",
         default_source: || Source::OpencodeGo {
             db: None,
             limits: Limits::opencode_go(),

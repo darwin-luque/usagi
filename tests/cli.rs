@@ -328,3 +328,31 @@ fn usage_without_config_shows_detection_guidance() {
         assert!(!sandbox.config.exists());
     }
 }
+
+#[test]
+fn go_subscription_does_not_report_local_spend_as_quota_without_credentials() {
+    let sandbox = Sandbox::new();
+    sandbox.success(&["add", "opencode-go"]);
+    let data = sandbox.directory.join(".local/share/opencode");
+    std::fs::create_dir_all(&data).unwrap();
+    let db = rusqlite::Connection::open(data.join("opencode.db")).unwrap();
+    db.execute_batch("CREATE TABLE message(time_created INTEGER, data TEXT);")
+        .unwrap();
+    db.execute(
+        "INSERT INTO message VALUES (?1, ?2)",
+        rusqlite::params![
+            chrono::Utc::now().timestamp_millis(),
+            r#"{"role":"assistant","providerID":"opencode-go","cost":15}"#
+        ],
+    )
+    .unwrap();
+    let output = sandbox.run(&["usage", "--only", "opencode-go", "--json"]);
+    let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(reports[0]["usage"].is_null());
+    assert!(
+        reports[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("No credentials found")
+    );
+}
