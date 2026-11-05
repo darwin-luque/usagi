@@ -28,10 +28,6 @@ color = "#22C55E"
 id = "go"
 kind = "opencode-go"
 
-[harness.limits]
-five_hours = 12.0
-week = 30.0
-
 [[harness]]
 id = "gemini"
 kind = "command"
@@ -79,7 +75,7 @@ Each kind also accepts these keys:
 | `codex` | `home` | The Codex folder. The default is `CODEX_HOME` or `~/.codex`. |
 | `cursor` | `state_db` | The path of the Cursor app `state.vscdb` file. |
 | `copilot` | `token_command` | A command that prints a GitHub token. |
-| `opencode-go` | `db`, `limits` | The OpenCode database path and the dollar limits. |
+| `opencode-go` | `db`, `limits` | `db` selects the token-history database. Legacy `limits` are accepted but subscription usage comes from the Go API. |
 | `pi` | `sessions`, `limits` | The Pi sessions folder and the dollar limits. |
 | `hermes` | `db`, `limits` | The Hermes database path and the dollar limits. |
 | `command` | `run` | The command to run. Required. |
