@@ -16,7 +16,13 @@ usagi spends zero model tokens. It reads the login files that your harnesses alr
 
 ## Install
 
-usagi needs Rust 1.85 or later.
+On macOS and Linux, install with [Homebrew](https://brew.sh):
+
+```sh
+brew install darwin-luque/tap/usagi
+```
+
+To build from source, you need Rust 1.85 or later:
 
 ```sh
 cargo install --git https://github.com/darwin-luque/usagi
