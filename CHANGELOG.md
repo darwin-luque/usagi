@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/darwin-luque/usagi/compare/v0.1.1...v0.1.2) (2026-11-07)
+
+
+### Bug Fixes
+
+* read active OpenCode 2 Go credentials ([#9](https://github.com/darwin-luque/usagi/issues/9)) ([e512a72](https://github.com/darwin-luque/usagi/commit/e512a7268036ce5d1b1e633ca74ac5fcf35ff43c))
+
 ## [0.1.1](https://github.com/darwin-luque/usagi/compare/v0.1.0...v0.1.1) (2026-11-05)
 
 
