@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use super::{Detection, ledger, remote};
 use crate::config::Limits;
@@ -27,7 +27,7 @@ fn is_v2(db: &Connection) -> rusqlite::Result<bool> {
 }
 
 const USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
-const LOGIN_HINT: &str = "Create a valid API key in OpenCode Console and save it with opencode auth login for OpenCode Go. Signing in again does not renew an expired key.";
+const LOGIN_HINT: &str = "Save an OpenCode Console API key with opencode auth login for OpenCode Go, and select the account with opencode auth switch if needed.";
 
 fn auth_path() -> PathBuf {
     ledger::default_data_home().join("opencode/auth.json")
@@ -35,8 +35,11 @@ fn auth_path() -> PathBuf {
 
 fn api_key(text: &str) -> Result<String, ProbeError> {
     let value = remote::json(text)?;
-    let auth = &value["opencode-go"];
-    if auth["type"].as_str() != Some("api") {
+    auth_key(&value["opencode-go"], "api")
+}
+
+fn auth_key(auth: &serde_json::Value, kind: &str) -> Result<String, ProbeError> {
+    if auth["type"].as_str() != Some(kind) {
         return Err(remote::missing(LOGIN_HINT));
     }
     auth["key"]
@@ -46,9 +49,42 @@ fn api_key(text: &str) -> Result<String, ProbeError> {
         .ok_or_else(|| remote::missing(LOGIN_HINT))
 }
 
-pub fn fetch(_path: Option<&Path>, _limits: &Limits) -> Result<Usage, ProbeError> {
+fn database_api_key(db: &Connection) -> Result<Option<String>, ProbeError> {
+    let database_error = |error: rusqlite::Error| ProbeError::Parse(error.to_string());
+    let has_credentials: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credential')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if !has_credentials {
+        return Ok(None);
+    }
+    let text: String = db
+        .query_row(
+            "SELECT value FROM credential WHERE integration_id = 'opencode-go' AND active = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)?
+        .ok_or_else(|| remote::missing(LOGIN_HINT))?;
+    auth_key(&remote::json(&text)?, "key").map(Some)
+}
+
+fn read_api_key(path: Option<&Path>) -> Result<String, ProbeError> {
+    if database_path(path).is_file()
+        && let Some(key) = database_api_key(&open(path)?)?
+    {
+        return Ok(key);
+    }
     let text = std::fs::read_to_string(auth_path()).map_err(|_| remote::missing(LOGIN_HINT))?;
-    fetch_usage(USAGE_URL, &api_key(&text)?)
+    api_key(&text)
+}
+
+pub fn fetch(path: Option<&Path>, _limits: &Limits) -> Result<Usage, ProbeError> {
+    fetch_usage(USAGE_URL, &read_api_key(path)?)
 }
 
 fn fetch_usage(url: &str, key: &str) -> Result<Usage, ProbeError> {
@@ -146,10 +182,7 @@ fn on_path(name: &str) -> bool {
 }
 
 pub fn detect(path: Option<&Path>) -> Detection {
-    let authenticated = std::fs::read_to_string(auth_path())
-        .ok()
-        .and_then(|text| api_key(&text).ok())
-        .is_some();
+    let authenticated = read_api_key(path).is_ok();
     if authenticated {
         Detection::Ready("OpenCode Go API key found.".into())
     } else if database_path(path).is_file() || on_path("opencode") {
@@ -226,6 +259,67 @@ mod tests {
             ));
         }
         assert!(matches!(api_key("bad json"), Err(ProbeError::Parse(_))));
+    }
+
+    #[test]
+    fn v2_credentials_use_only_the_active_go_account() {
+        let db = Connection::open_in_memory().unwrap();
+        assert_eq!(database_api_key(&db).unwrap(), None);
+        db.execute_batch(
+            "CREATE TABLE credential(integration_id TEXT, active INTEGER, value TEXT);",
+        )
+        .unwrap();
+        for (integration, active, key) in [
+            ("opencode-go", 0, "expired-key"),
+            ("opencode", 1, "console-key"),
+            ("opencode-go", 1, "current-key"),
+        ] {
+            db.execute(
+                "INSERT INTO credential VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    integration,
+                    active,
+                    serde_json::json!({"type": "key", "key": key}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            database_api_key(&db).unwrap().as_deref(),
+            Some("current-key")
+        );
+        db.execute(
+            "UPDATE credential SET active = 0 WHERE integration_id = 'opencode-go'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            database_api_key(&db),
+            Err(ProbeError::MissingCredentials { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_v2_credentials_are_not_replaced_with_legacy_credentials() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE credential(integration_id TEXT, active INTEGER, value TEXT);",
+        )
+        .unwrap();
+        for value in [
+            r#"{"type":"key","key":" "}"#,
+            r#"{"type":"oauth","access":"token"}"#,
+            "{}",
+            "bad json",
+        ] {
+            db.execute("DELETE FROM credential", []).unwrap();
+            db.execute(
+                "INSERT INTO credential VALUES ('opencode-go', 1, ?1)",
+                [value],
+            )
+            .unwrap();
+            assert!(database_api_key(&db).is_err());
+        }
     }
 
     #[test]

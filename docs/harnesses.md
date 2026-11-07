@@ -68,7 +68,7 @@ The harnesses do not share one usage format. usagi converts each format into one
 ## OpenCode Go
 
 - **Kind:** `opencode-go`
-- **Login:** reads the `opencode-go` API key from `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share/opencode/auth.json`). Save the key with `opencode auth login`. If it expires, create a new key in OpenCode Console; signing in again does not renew an expired key.
+- **Login:** reads the active `opencode-go` credential from OpenCode 2's `credential` table in `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/opencode.db`). For OpenCode 1, reads `$XDG_DATA_HOME/opencode/auth.json`. Save the key with `opencode auth login`, and use `opencode auth switch` to select an account in OpenCode 2. A configured `db` path selects the database for both credentials and token history.
 - **Data:** asks `https://opencode.ai/zen/go/v1/usage` for the subscription's 5-hour, weekly, and monthly percentages and reset timestamps. These are account usage values, including usage from other computers.
 - **Limits:** the service reports the allowance consumed directly. Legacy `limits` settings remain accepted for compatibility but do not override subscription usage. The `db` setting applies only to token history.
 - **Errors:** missing or expired credentials, network failures, and invalid responses are reported as errors. Local dollar estimates are not substituted for subscription usage.
